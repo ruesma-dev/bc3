@@ -181,4 +181,4 @@ cython_debug/
 # Archivos de entorno
 *.env
 *.ENV
-
+*.bc3
