@@ -41,15 +41,13 @@ class Node:
 # --------------------------------------------------------------------------- #
 #                             PARSEO DEL FICHERO                              #
 # --------------------------------------------------------------------------- #
-def _kind_from_code(code: str) -> str:
-    if code.endswith("#"):
+def _kind(code: str, tipo: str) -> str:
+    if "##" in code:
+        return "Titulo"
+    if "#" in code:
         return "capítulo"
-    if " DESC" in code:
-        return "descompuesto"
-    if "." in code:
-        _, tail = code.split(".", 1)
-        return "subcapítulo" if tail.lstrip("0") == "" else "partida"
-    return "otro"
+    mapa = {"0": "partida", "1": "descompuesto_mo", "2": "descompuesto_maq", "3": "descompuesto_mat"}
+    return mapa.get(tipo, "otro")
 
 
 def _num(txt: str) -> Optional[float]:
@@ -57,57 +55,47 @@ def _num(txt: str) -> Optional[float]:
 
 
 def build_tree(path: Path) -> List[Node]:
-    nodes: Dict[str, Node] = {}
-    parents: Dict[str, str] = {}
-    qty: Dict[str, float] = {}
-    meas: Dict[str, List[str]] = {}
+    nodes, parents, qty, meas = {}, {}, {}, {}
 
     with path.open(encoding="latin-1", errors="ignore") as fh:
         for raw in fh:
             tag = raw[:2]
 
-            # ------------------ CONCEPTOS (~C) --------------------------------
+            # ---------------- CONCEPTOS --------------------------------------
             if tag == "~C":
                 _, rest = raw.split("|", 1)
-                code, unidad, desc, pres, *_ = rest.rstrip("|\n").split("|")
+                parts = rest.rstrip("\n").split("|")
+                if len(parts) < 6:
+                    continue
+                code, unidad, desc, pres, _, tipo = parts[:6]
+                print(parts, tipo)
                 nodes[code] = Node(
                     code=code,
                     description=desc,
-                    kind=_kind_from_code(code),
+                    kind=_kind(code, tipo),
                     unidad=unidad or None,
                     precio=_num(pres),
                 )
 
-            # ------------------ RELACIONES (~D) -------------------------------
-            # -------------------- RELACIONES (~D) CORREGIDO -----------------------------
+            # -------------- RELACIONES (~D) ----------------------------------
             elif tag == "~D":
-                # Ej.: ~D|01.002|01.002 DESC\1\690.6\|
-                _, rest = raw.split("|", 1)  # rest = "01.002|01.002 DESC\1\690.6\|"
-                parent_code, child_part = rest.split("|", 1)  # "01.002", "01.002 DESC\1\690.6\|"
-                child_part = child_part.rstrip("|\n")  # quita el | final
-                chunks = child_part.split("\\")  # ['01.002 DESC','1','690.6','']
-
-                for i in range(0, len(chunks), 3):  # grupo = hijo, coef1, CanPres
+                _, rest = raw.split("|", 1)
+                parent_code, child_part = rest.split("|", 1)
+                chunks = child_part.rstrip("|\n").split("\\")
+                for i in range(0, len(chunks), 3):
                     child_code = chunks[i].strip()
                     if not child_code:
                         continue
-                    coef1 = chunks[i + 1] if i + 1 < len(chunks) else ""
                     canp = chunks[i + 2] if i + 2 < len(chunks) else ""
-
-                    parents[child_code] = parent_code  # --> lista de hijos directa
-
-                    if _NUM.match(canp):  # Cantidad presupuestada correcta
+                    parents[child_code] = parent_code
+                    if _NUM.match(canp):
                         qty[child_code] = float(canp.replace(",", "."))
 
-
-            # ------------------ MEDICIONES (~M) -------------------------------
+            # -------------- MEDICIONES (~M) ----------------------------------
             elif tag == "~M":
-                # form: ~M|<algo\código>|...  → el código va detrás de la 1.ª '\'
-                body = raw.split("|", 2)[1]  # C001\01.001|...
-                parts = body.split("\\", 1)
-                if len(parts) >= 2:
-                    code = parts[1].split("|", 1)[0]
-                    meas.setdefault(code, []).append(raw.rstrip())
+                body = raw.split("|", 2)[1]
+                code = body.split("\\", 1)[1].split("|", 1)[0]
+                meas.setdefault(code, []).append(raw.rstrip())
 
     # Enlazar jerarquía y asignar datos
     for child_code, parent_code in parents.items():

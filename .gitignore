@@ -182,3 +182,4 @@ cython_debug/
 *.env
 *.ENV
 *.bc3
+*.png
