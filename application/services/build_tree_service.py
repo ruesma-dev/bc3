@@ -2,14 +2,18 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 from collections import defaultdict
 import re
+
 from utils.text_sanitize import clean_text
 
 _NUM = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
 
+# --------------------------------------------------------------------------- #
+#                                 Node                                        #
+# --------------------------------------------------------------------------- #
 @dataclass
 class Node:
     code: str
@@ -33,6 +37,9 @@ class Node:
             ch.compute_total()
 
 
+# --------------------------------------------------------------------------- #
+#                       helpers                                               #
+# --------------------------------------------------------------------------- #
 def _kind(code: str, t: str) -> str:
     if "##" in code:
         return "supercapítulo"
@@ -45,8 +52,10 @@ def _num(v: str) -> float | None:
     return float(v.replace(",", ".")) if v and _NUM.match(v) else None
 
 
-# ------------------ PASADA EXTRA ------------------------------------------- #
-def _convert_lonely_des(nodes: Dict[str, Node]) -> None:
+# --------------------------------------------------------------------------- #
+#         PASADA EXTRA – des huérfano  y  partida sin hijos                   #
+# --------------------------------------------------------------------------- #
+def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
     parent_of = {ch.code: p.code for p in nodes.values() for ch in p.children}
     roots = [n for n in nodes.values() if n.code not in parent_of]
 
@@ -54,84 +63,73 @@ def _convert_lonely_des(nodes: Dict[str, Node]) -> None:
         for ch in n.children:
             dfs(ch)
 
-        hermanos = n.children
-        if not hermanos or not any(h.kind == "partida" for h in hermanos):
+        # --- regla A: partidas ya presentes ---------------------------------
+        if n.kind == "partida" and not n.children:
+            _create_clone(n)
+
+        # --- regla B: descompuestos huérfanos junto a partidas -------------
+        bros = n.children
+        if bros and any(b.kind == "partida" for b in bros):
+            for des in bros:
+                if des.kind.startswith("des_") and not des.children:
+                    des.kind = "partida"
+                    des.can_pres = des.can_pres or 1
+                    _create_clone(des)
+
+    def _create_clone(parent: Node):
+        clone_code = (parent.code + ".1")[:20]
+        if any(c.code == clone_code for c in parent.children):
             return
-
-        for des in list(hermanos):
-            if des.kind.startswith("des_") and not des.children:
-                # ---- convertir des a partida (mantiene sus valores) ----------
-                des.kind = "partida"
-                if des.can_pres is None:
-                    des.can_pres = 1
-
-                # ---- crear clon .1 con todo = 1 ------------------------------
-                clone_code = (des.code + ".1")[:20]
-                clone = Node(
-                    code=clone_code,
-                    description=des.description,
-                    long_desc=des.long_desc,
-                    kind="des_mat",
-                    unidad=des.unidad,
-                    precio=1.0,
-                    can_pres=1.0,
-                    imp_pres=1.0,
-                )
-                clone.compute_total()
-                des.add_child(clone)
+        clone = Node(
+            code=clone_code,
+            description=parent.description,
+            long_desc=parent.long_desc,
+            kind="des_mat",
+            unidad=parent.unidad,
+            precio=1.0,
+            can_pres=1.0,
+            imp_pres=1.0,
+        )
+        clone.compute_total()
+        parent.add_child(clone)
 
     for r in roots:
         dfs(r)
 
 
 # --------------------------------------------------------------------------- #
-#                 Re‑escribir modificaciones en la copia BC3                 #
+#           Re‑escribir modificaciones en la copia BC3                       #
 # --------------------------------------------------------------------------- #
 def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
-    """
-    Para cada descompuesto convertido en partida:
-      • Reemplaza su línea ~C  →  T = 0   (mismo nº de columnas, misma unidad…)
-      • Añade el clon .1 con unidad, y con precio = 1, fecha = 1, T = 3
-      • Añade la ~D partida → clon  (\1\1)
-    """
     lines = path.read_text("latin-1", errors="ignore").splitlines(keepends=True)
     out: list[str] = []
-    processed_clones: set[str] = set()
+    done: set[str] = set()
 
     for ln in lines:
         if ln.startswith("~C|"):
             _, rest = ln.split("|", 1)
             parts = rest.rstrip("\n").split("|")
-
-            # Aseguramos al menos 6 campos (código, unidad, desc, pres, fecha, tipo)
             while len(parts) < 6:
                 parts.append("")
 
             code = parts[0]
             node = nodes.get(code)
 
-            if (
-                node
-                and node.kind == "partida"
-                and node.children
-                and node.children[0].code.endswith(".1")
-            ):
-                # --------- línea del nodo convertido a partida ---------------
-                parts[5] = "0"                   # tipo -> partida
+            # nodos partida (convertidos o ya partidas) que tienen clon .1
+            if node and node.kind == "partida" and any(c.code.endswith(".1") for c in node.children):
+                parts[5] = "0"              # tipo partida
                 out.append("~C|" + "|".join(parts) + "|\n")
 
-                # --------- línea del clon (.1) --------------------------------
-                clone = node.children[0]
-                if clone.code not in processed_clones:
-                    clone_parts = parts.copy()
-                    clone_parts[0] = clone.code       # nuevo código
-                    clone_parts[3] = "1"               # precio = 1
-                    clone_parts[4] = "1"               # fecha = 1
-                    clone_parts[5] = "3"               # tipo material
-                    out.append("~C|" + "|".join(clone_parts) + "|\n")
-                    # relación D partida -> clon  (coef 1, cantidad 1)
-                    out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1\\|\n")
-                    processed_clones.add(clone.code)
+                for clone in node.children:
+                    if clone.code not in done and clone.code.endswith(".1"):
+                        clone_parts = parts.copy()
+                        clone_parts[0] = clone.code
+                        clone_parts[3] = "1"   # precio 1
+                        clone_parts[4] = "1"   # fecha 1
+                        clone_parts[5] = "3"   # material
+                        out.append("~C|" + "|".join(clone_parts) + "|\n")
+                        out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1\\|\n")
+                        done.add(clone.code)
                 continue
 
         out.append(ln)
@@ -139,7 +137,9 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
     path.write_text("".join(out), "latin-1", errors="ignore")
 
 
-# ------------------------ PARSER PRINCIPAL --------------------------------- #
+# --------------------------------------------------------------------------- #
+#                           PARSER PRINCIPAL                                  #
+# --------------------------------------------------------------------------- #
 def build_tree(bc3_path: Path) -> List[Node]:
     nodes: Dict[str, Node] = {}
     parents: Dict[str, str] = {}
@@ -185,7 +185,7 @@ def build_tree(bc3_path: Path) -> List[Node]:
                     code = body.split("\\", 1)[1].split("|", 1)[0]
                     meas_map[code].append(raw.rstrip())
 
-    # enlazar jerarquía
+    # jerarquía
     for ch, p in parents.items():
         if ch in nodes and p in nodes:
             nodes[p].add_child(nodes[ch])
@@ -198,10 +198,10 @@ def build_tree(bc3_path: Path) -> List[Node]:
             n.measurements = meas_map[c]
         n.compute_total()
 
-    # pasada extra
-    _convert_lonely_des(nodes)
+    # pasada extra (descompuestos huérfanos y partidas sin hijos)
+    _add_missing_clones(nodes)
 
-    # actualizar BC3
+    # escribir cambios en BC3
     _rewrite_bc3(bc3_path, nodes)
 
     # raíces
