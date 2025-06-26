@@ -128,7 +128,7 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
                         clone_parts[4] = "1"   # fecha 1
                         clone_parts[5] = "3"   # material
                         out.append("~C|" + "|".join(clone_parts) + "|\n")
-                        out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1\\|\n")
+                        out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1|\n")
                         done.add(clone.code)
                 continue
 
