@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 from collections import defaultdict
-from utils.text_sanitize import clean_text
+from bc3_lib.utils.text_sanitize import clean_text
 
 MAX_CODE_LEN = 20
 
