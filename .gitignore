@@ -185,3 +185,5 @@ cython_debug/
 *.png
 *.json
 *.xlsx
+*.presto
+*.prestorecover
