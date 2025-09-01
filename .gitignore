@@ -183,3 +183,5 @@ cython_debug/
 *.ENV
 *.bc3
 *.png
+*.json
+*.xlsx

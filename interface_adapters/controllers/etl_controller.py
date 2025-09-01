@@ -1,5 +1,4 @@
 # interface_adapters/controllers/etl_controller.py
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,6 +28,7 @@ from application.services.product_selection_service import (
     apply_code_mapping_to_nodes,
     rewrite_bc3_with_product_codes,
 )
+from application.services.audit_service import export_product_matches_audit
 
 
 def _print_tree(node, indent: int = 0) -> None:
@@ -65,7 +65,7 @@ def run_etl(input_filename: str = "presupuesto.bc3") -> None:
         rewrite_bc3_with_clones(mod_file, roots)
         print(f"[Clones] Añadidos {len(created)} clones '.1'.")
 
-    # 3) Selección de producto (batch por defecto)
+    # 3) Selección de producto
     catalog = ProductCatalog(PRODUCTS_PATH)
     catalog.load()
 
@@ -102,20 +102,28 @@ def run_etl(input_filename: str = "presupuesto.bc3") -> None:
             min_confidence=GEMINI_MIN_CONFIDENCE,
         )
 
+    # ⬇️ 3.1 Auditoría JSON/CSV ANTES del renombrado de BC3/árbol
+    audit_json = output_dir / "product_mapping_audit.json"
+    audit_csv = output_dir / "product_mapping_audit.csv"
+    export_product_matches_audit(roots, matches, audit_json, audit_csv)
+    print(f"[Audit] JSON → {audit_json.resolve()}")
+    print(f"[Audit] CSV  → {audit_csv.resolve()}")
+
     if code_map:
+        # 4) Reescritura BC3 y sincronización del árbol
         rewrite_bc3_with_product_codes(mod_file, code_map)
         apply_code_mapping_to_nodes(roots, code_map)
         print(f"[Product Mapping] Renombrados {len(code_map)} descompuestos.")
     else:
         print("[Product Mapping] No se encontraron asignaciones de producto.")
 
-    # 4) Árbol (opcional)
+    # 5) Árbol (opcional)
     print("\n=== ÁRBOL DE CONCEPTOS ===")
     for root in roots:
         _print_tree(root)
     print("=== FIN DEL ÁRBOL ===\n")
 
-    # 5) Export CSV
+    # 6) Export CSV final
     rows = nodes_to_rows(roots)
     df = pd.DataFrame.from_records(
         rows,
