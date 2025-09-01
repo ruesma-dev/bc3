@@ -1,0 +1,13 @@
+# config/products.yaml
+# Minimal: code + name. Puedes añadir atributos si te ayudan (marca, proveedor, etiquetas…)
+products:
+  - code: CEMI-CEMI42-25KG
+    name: Cemento CEM II 42.5N (Saco 25kg)
+    brand: GenCem
+    keywords: ["cemento", "hormigón", "aglomerante", "CEM II", "42.5"]
+  - code: ARENA-FINA-M3
+    name: Arena fina lavada (m3)
+    keywords: ["arena", "árido fino", "mortero"]
+  - code: LADRILLO-H12
+    name: Ladrillo hueco doble 12 cm
+    keywords: ["ladrillo", "cerámico", "tabique", "12 cm"]

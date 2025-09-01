@@ -1,9 +1,10 @@
 # interface_adapters/controllers/etl_controller.py
 
 from __future__ import annotations
-from pathlib import Path
 
+from pathlib import Path
 import pandas as pd
+
 from bc3_lib.infra.reader import build_tree as lib_build_tree
 from bc3_lib.app.flatten import nodes_to_rows
 
@@ -13,12 +14,28 @@ from application.services.missing_clones_service import (
     rewrite_bc3_with_clones,
 )
 
+from config.settings import (
+    CSV_DEFAULT_PATH, CSV_ENCODING, CSV_SEP,
+    PRODUCTS_PATH,
+    GEMINI_API_KEY, GEMINI_MODEL_NAME,
+    GEMINI_RPM, GEMINI_MAX_RETRIES, GEMINI_ON_429,
+    GEMINI_BATCH_MODE, GEMINI_BATCH_SIZE, PREFILTER_TOPK, GEMINI_MIN_CONFIDENCE,
+)
+from infrastructure.product_catalog.product_catalog import ProductCatalog
+from infrastructure.llm.gemini_client import GeminiClient
+from application.services.product_selection_service import (
+    build_product_code_mapping,
+    build_product_code_mapping_batch,
+    apply_code_mapping_to_nodes,
+    rewrite_bc3_with_product_codes,
+)
+
 
 def _print_tree(node, indent: int = 0) -> None:
     spacer = " " * indent
     print(
         f"{spacer}- [{node.kind.upper():12}] "
-        f"{node.code:<15} "
+        f"{node.code:<20} "
         f"{(node.unidad or '').ljust(5)} "
         f"{node.description}"
     )
@@ -32,41 +49,83 @@ def run_etl(input_filename: str = "presupuesto.bc3") -> None:
         raise FileNotFoundError(original)
 
     output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True, parents=True)
     mod_file = output_dir / "presupuesto_material.bc3"
 
-    # 0) Preproceso/limpieza (R1–R5)
+    # 0) Preproceso
     convert_to_material(original, mod_file)
     print(f"BC3 modificado  →  {mod_file.resolve()}")
 
-    # 1) Árbol (librería)
+    # 1) Árbol
     roots = lib_build_tree(mod_file)
 
-    # 2) Pasada extra (clones .1) + reescritura BC3
+    # 2) Clones
     created = add_missing_clones(roots)
     if created:
         rewrite_bc3_with_clones(mod_file, roots)
+        print(f"[Clones] Añadidos {len(created)} clones '.1'.")
 
-    # 3) Impresión jerárquica (opcional)
+    # 3) Selección de producto (batch por defecto)
+    catalog = ProductCatalog(PRODUCTS_PATH)
+    catalog.load()
+
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY no configurada en .env")
+
+    print(
+        f"[Gemini] Modelo={GEMINI_MODEL_NAME} RPM={GEMINI_RPM} "
+        f"batch_mode={GEMINI_BATCH_MODE} batch_size={GEMINI_BATCH_SIZE} topk={PREFILTER_TOPK}"
+    )
+
+    gemini = GeminiClient(
+        api_key=GEMINI_API_KEY,
+        model_name=GEMINI_MODEL_NAME,
+        rpm=GEMINI_RPM,
+        max_retries=GEMINI_MAX_RETRIES,
+        on_429=GEMINI_ON_429,
+    )
+
+    if GEMINI_BATCH_MODE:
+        code_map, matches = build_product_code_mapping_batch(
+            roots=roots,
+            catalog=catalog,
+            gemini=gemini,
+            batch_size=GEMINI_BATCH_SIZE,
+            topk=PREFILTER_TOPK,
+            min_confidence=GEMINI_MIN_CONFIDENCE,
+        )
+    else:
+        code_map, matches = build_product_code_mapping(
+            roots=roots,
+            catalog=catalog,
+            gemini=gemini,
+            min_confidence=GEMINI_MIN_CONFIDENCE,
+        )
+
+    if code_map:
+        rewrite_bc3_with_product_codes(mod_file, code_map)
+        apply_code_mapping_to_nodes(roots, code_map)
+        print(f"[Product Mapping] Renombrados {len(code_map)} descompuestos.")
+    else:
+        print("[Product Mapping] No se encontraron asignaciones de producto.")
+
+    # 4) Árbol (opcional)
     print("\n=== ÁRBOL DE CONCEPTOS ===")
     for root in roots:
         _print_tree(root)
     print("=== FIN DEL ÁRBOL ===\n")
 
-    # 4) Export CSV desde el árbol ya clonado (sin reparsear)
+    # 5) Export CSV
     rows = nodes_to_rows(roots)
-    df = pd.DataFrame.from_records(rows, columns=[
-        "tipo",
-        "codigo",
-        "descripcion_corta",
-        "descripcion_larga",
-        "unidad",
-        "precio",
-        "cantidad_pres",
-        "importe_pres",
-        "hijos",
-        "mediciones",
-    ])
-    csv_path = output_dir / "presupuesto_tree.csv"
-    df.to_csv(csv_path, sep=";", index=False, encoding="utf-8")
+    df = pd.DataFrame.from_records(
+        rows,
+        columns=[
+            "tipo", "codigo", "descripcion_corta", "descripcion_larga",
+            "unidad", "precio", "cantidad_pres", "importe_pres",
+            "hijos", "mediciones",
+        ],
+    )
+    csv_path = CSV_DEFAULT_PATH
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(csv_path, sep=CSV_SEP, index=False, encoding=CSV_ENCODING)
     print(f"CSV generado    →  {csv_path.resolve()}\n")
