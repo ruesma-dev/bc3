@@ -257,6 +257,11 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
       • Dentro de cada ~D (por partida): si DOS O MÁS hijos quedan con
         el MISMO base_new y vienen de códigos originales DISTINTOS, añade
         sufijos a,b,c… en el 2º, 3º, … y crea sus ~C clonados.
+
+    Además:
+      • Normaliza ~C recortando campos vacíos de cola → evita ...|0||| → ...|0||
+      • Asegura que ~D termina SIEMPRE con «\» antes de la «|» final (requisito de BC):
+          ~D|PADRE|hijo\coef\cant\ ... \|
     """
     if not code_map:
         return
@@ -269,8 +274,11 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
                 if raw.startswith("~C|"):
                     _, rest = raw.split("|", 1)
                     parts = rest.rstrip("\n").split("|")
-                    code = parts[0]
-                    fout.write(raw)
+                    # recorta vacíos de cola
+                    while parts and parts[-1] == "":
+                        parts.pop()
+                    code = parts[0] if parts else ""
+                    fout.write("~C|" + "|".join(parts) + "|\n")
                     if code in code_map:
                         fout.write(f"~T|{code}|PRD:{code_map[code]}|\n")
                 else:
@@ -287,18 +295,24 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
         suf = letters[j] if 0 <= j < len(letters) else f"x{idx}"
         return (base + suf)[:MAX_CODE_LEN]
 
-    lines = path.read_text("latin-1", errors="ignore").splitlines()
-    out: list[str] = []
+    def trim_trailing_empty(fields: List[str]) -> List[str]:
+        i = len(fields)
+        while i > 0 and fields[i - 1] == "":
+            i -= 1
+        return fields[:i]
 
-    # Guardaremos el ~C "base" para poder clonar luego
-    concept_map: Dict[str, list[str]] = {}
+    lines = path.read_text("latin-1", errors="ignore").splitlines()
+    out: List[str] = []
+
+    # Para clonar ~C cuando haya sufijos a/b/c…
+    concept_map: Dict[str, List[str]] = {}
     concept_written: set[str] = set()
     clones_needed: Dict[str, str] = {}  # clone -> base
 
     for raw in lines:
         if raw.startswith("~C|"):
             head, rest = raw.split("|", 1)
-            parts = rest.rstrip("\n").split("|")
+            parts = trim_trailing_empty(rest.rstrip("\n").split("|"))
             if parts:
                 old = parts[0]
                 base_new = code_map.get(old, old)
@@ -316,10 +330,10 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
             parent_code, child_part = rest.split("|", 1)
             chunks = child_part.rstrip("|").split("\\")
 
-            # 1) Mapeamos cada triple a (old, base, coef, qty)
-            triples: list[tuple[str, str, str, str]] = []
+            # 1) Descompone en triples y aplica mapping base
+            triples: List[tuple[str, str, str, str]] = []
             for i in range(0, len(chunks), 3):
-                old = chunks[i].strip()
+                old = chunks[i].strip() if i < len(chunks) else ""
                 if not old:
                     continue
                 coef = chunks[i + 1] if i + 1 < len(chunks) else ""
@@ -327,19 +341,18 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
                 base = code_map.get(old, old)
                 triples.append((old, base, coef, qty))
 
-            # 2) Agrupamos por base y contamos solo si provienen de OLD distintos
-            group_old: Dict[str, list[str]] = {}
+            # 2) Detección de colisiones por base entre OLD distintos
+            group_old: Dict[str, List[str]] = {}
             for old, base, _, _ in triples:
                 group_old.setdefault(base, []).append(old)
 
-            # 3) Escribimos aplicando sufijo SOLO si hay >1 OLD distinto
+            # 3) Construye chunks nuevos; añade sufijo a/b/c solo si >1 OLD distinto
             seen_per_base: Dict[str, int] = {}
-            new_chunks: list[str] = []
+            new_chunks: List[str] = []
             for old, base, coef, qty in triples:
                 final = base
                 olds = group_old.get(base, [])
-                need_suffix = len(set(olds)) > 1  # <- clave: solo si distintos códigos originales
-                if need_suffix:
+                if len(set(olds)) > 1:
                     seen_per_base[base] = seen_per_base.get(base, 0) + 1
                     idx = seen_per_base[base]
                     if idx > 1:
@@ -347,22 +360,25 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
                         clones_needed[final] = base
                 new_chunks.extend([final, coef, qty])
 
-            out.append(f"~D|{parent_code}|{'\\'.join(new_chunks)}|")
+            # 4) ENSURE trailing backslash before final '|'
+            body = "\\".join(new_chunks) + "\\"
+            out.append(f"~D|{parent_code}|{body}|")
             continue
 
-        # Resto de líneas: renombrado simple de códigos mapeados
+        # Resto: solo sustituye códigos sin tocar delimitadores
         line = raw
         for old, new in code_map.items():
             line = re.sub(rf"{re.escape(old)}(?=[\\|])", new, line)
         out.append(line)
 
-    # 4) Añadimos ~C clonados a partir del concepto base
+    # Añadir ~C clonados a partir del concepto base (ya con campos recortados)
     for clone_code, base_code in clones_needed.items():
         base_parts = concept_map.get(base_code)
         if not base_parts:
             continue
         parts = base_parts.copy()
         parts[0] = clone_code
+        parts = trim_trailing_empty(parts)
         out.append(f"~C|{'|'.join(parts)}|")
 
     Path(path).write_text("\n".join(out) + "\n", encoding="latin-1", errors="ignore")
