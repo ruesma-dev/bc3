@@ -20,6 +20,7 @@ from config.settings import (
     GEMINI_MIN_CONFIDENCE,
     MAP_KINDS,
     DISCOUNT_PRODUCT_CODE,
+    PRICE_LOCK_MODE
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +112,10 @@ def _parent_map(roots: List[Node]) -> Dict[str, str]:
         dfs(r)
     return pmap
 
+def _is_discount_by_unit(unit: str | None) -> bool:
+    """Regla DESCUENTO: únicamente si la unidad original es '%'."""
+    return (unit or "").strip() == "%"
+
 
 # ─────────────────────────── Selección INDIVIDUAL ───────────────────────────
 def build_product_code_mapping(
@@ -122,8 +127,8 @@ def build_product_code_mapping(
 ) -> Tuple[Dict[str, str], List[ProductMatch]]:
     """
     Devuelve old_code -> BASE_product_code (sin sufijos globales).
-    Si el CÓDIGO ORIGINAL contiene '%' o 'DESC' → 'DESCUENTO'.
-    Los posibles sufijos a/b/c se aplican MÁS TARDE por partida.
+    Regla DESCUENTO: SOLO si la UNIDAD original es '%'.
+    Las colisiones entre hermanos se resuelven en rewrite_bc3_with_product_codes().
     """
     mapping: Dict[str, str] = {}
     matches: List[ProductMatch] = []
@@ -133,15 +138,16 @@ def build_product_code_mapping(
 
     for node in _iter_target_nodes(roots):
         raw_code = node.code or ""
+        unit = (node.unidad or "").strip()
         short_desc = node.description or ""
         long_desc = node.long_desc or ""
         sig = (short_desc.strip().lower(), long_desc.strip().lower())
 
-        # Regla DESCUENTO por código original
-        if "%" in raw_code or "DESC" in raw_code.upper():
+        # ---- REGLA DESCUENTO por UNIDAD '%'
+        if _is_discount_by_unit(unit):
             pick_code = DISCOUNT_PRODUCT_CODE
             pick_conf = 1.0
-            pick_reason = "rule:discount"
+            pick_reason = "rule:discount_unit"
         else:
             # LLM (cacheado por firma short/long)
             if sig not in cache:
@@ -164,16 +170,14 @@ def build_product_code_mapping(
         if not pick_code:
             continue
 
-        base = _normalize_bc3_code(pick_code)  # ← SOLO normalizamos; NUNCA _assign_unique
-        if base != node.code:
-            mapping[node.code] = base
-            matches.append(ProductMatch(node.code, base, float(pick_conf), pick_reason))
+        base = _normalize_bc3_code(pick_code)  # ← sin unicidad global
+        if base != raw_code:
+            mapping[raw_code] = base
+            matches.append(ProductMatch(raw_code, base, float(pick_conf), pick_reason))
 
     return mapping, matches
 
 
-
-# ────────────────────────────── Selección BATCH ─────────────────────────────
 def build_product_code_mapping_batch(
     *,
     roots: List[Node],
@@ -184,29 +188,31 @@ def build_product_code_mapping_batch(
     min_confidence: float = GEMINI_MIN_CONFIDENCE,
 ) -> Tuple[Dict[str, str], List[ProductMatch]]:
     """
-    Igual que la individual, pero en batch. Devuelve SIEMPRE códigos BASE.
-    La resolución de colisiones entre hermanos la hace rewrite_bc3_with_product_codes().
+    Versión batch: devuelve CÓDIGOS BASE sin sufijos globales.
+    Regla DESCUENTO: SOLO si la UNIDAD original es '%'.
     """
     mapping: Dict[str, str] = {}
     matches: List[ProductMatch] = []
 
-    # 1) Preparar lotes (aplicar DESCUENTO antes; dedupe por firma)
+    # 1) Preparar lotes (dedupe por firma); primero resolvemos los '%' (no van a LLM)
     sig_to_nodes: Dict[str, List[Node]] = {}
     items: List[Dict[str, Any]] = []
 
     for node in _iter_target_nodes(roots):
         raw_code = node.code or ""
+        unit = (node.unidad or "").strip()
         short_desc = (node.description or "").strip()
         long_desc = (node.long_desc or "").strip()
 
-        # DESCUENTO directo
-        if "%" in raw_code or "DESC" in raw_code.upper():
+        # DESCUENTO directo por UNIDAD '%'
+        if _is_discount_by_unit(unit):
             base = _normalize_bc3_code(DISCOUNT_PRODUCT_CODE)
-            if base != node.code:
-                mapping[node.code] = base
-                matches.append(ProductMatch(node.code, base, 1.0, "rule:discount"))
+            if base != raw_code:
+                mapping[raw_code] = base
+                matches.append(ProductMatch(raw_code, base, 1.0, "rule:discount_unit"))
             continue
 
+        # Para LLM (deduplicado por firma)
         sig = f"{short_desc.lower()}||{long_desc.lower()}"
         if sig not in sig_to_nodes:
             q = long_desc or short_desc
@@ -217,7 +223,7 @@ def build_product_code_mapping_batch(
             sig_to_nodes[sig] = []
         sig_to_nodes[sig].append(node)
 
-    # 2) Llamadas batch
+    # 2) Llamadas batch al LLM
     for i in range(0, len(items), max(1, batch_size)):
         chunk = items[i : i + batch_size]
         results = gemini.select_products_batch(items=chunk) or []
@@ -240,60 +246,29 @@ def build_product_code_mapping_batch(
             if not pick_code:
                 continue
 
-            base = _normalize_bc3_code(pick_code)  # ← SIN _assign_unique
+            base = _normalize_bc3_code(pick_code)
             for node in sig_to_nodes[rid]:
-                if base != node.code:
-                    mapping[node.code] = base
-                    matches.append(ProductMatch(node.code, base, float(pick_conf), pick_reason))
+                raw_code = node.code or ""
+                if base != raw_code:
+                    mapping[raw_code] = base
+                    matches.append(ProductMatch(raw_code, base, float(pick_conf), pick_reason))
 
     return mapping, matches
 
 
 # ───────────────────────── Reescritura BC3 (con sufijos) ────────────────────
 def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None:
-    """
-    Renombra códigos (~C y referencias) aplicando:
-      • Mapa old_code -> base_new_code (sin sufijos globales)
-      • Dentro de cada ~D (por partida): si DOS O MÁS hijos quedan con
-        el MISMO base_new y vienen de códigos originales DISTINTOS, añade
-        sufijos a,b,c… en el 2º, 3º, … y crea sus ~C clonados.
-
-    Además:
-      • Normaliza ~C recortando campos vacíos de cola → evita ...|0||| → ...|0||
-      • Asegura que ~D termina SIEMPRE con «\» antes de la «|» final (requisito de BC):
-          ~D|PADRE|hijo\coef\cant\ ... \|
-    """
     if not code_map:
         return
 
-    if not USE_DESTRUCTIVE_RENAME:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with path.open("r", encoding="latin-1", errors="ignore") as fin, \
-             tmp.open("w", encoding="latin-1", errors="ignore") as fout:
-            for raw in fin:
-                if raw.startswith("~C|"):
-                    _, rest = raw.split("|", 1)
-                    parts = rest.rstrip("\n").split("|")
-                    # recorta vacíos de cola
-                    while parts and parts[-1] == "":
-                        parts.pop()
-                    code = parts[0] if parts else ""
-                    fout.write("~C|" + "|".join(parts) + "|\n")
-                    if code in code_map:
-                        fout.write(f"~T|{code}|PRD:{code_map[code]}|\n")
-                else:
-                    fout.write(raw)
-        tmp.replace(path)
-        return
-
-    MAX_CODE_LEN = 20
     letters = "abcdefghijklmnopqrstuvwxyz"
 
+    def letter_at(idx: int) -> str:
+        j = idx - 2  # 2->a, 3->b...
+        return letters[j] if 0 <= j < len(letters) else f"x{idx}"
+
     def with_letter(base: str, idx: int) -> str:
-        # idx=2->a, 3->b, …; si se agota, usa 'xN'
-        j = idx - 2
-        suf = letters[j] if 0 <= j < len(letters) else f"x{idx}"
-        return (base + suf)[:MAX_CODE_LEN]
+        return (base + letter_at(idx))[:MAX_CODE_LEN]
 
     def trim_trailing_empty(fields: List[str]) -> List[str]:
         i = len(fields)
@@ -301,85 +276,119 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
             i -= 1
         return fields[:i]
 
+    # 1) Leemos todo y guardamos:
+    #   - ~C originales por código (para tomar UD/Precio/Texto del ORIGEN)
+    #   - ~D por partida
+    #   - resto de líneas tal cual
     lines = path.read_text("latin-1", errors="ignore").splitlines()
-    out: List[str] = []
-
-    # Para clonar ~C cuando haya sufijos a/b/c…
-    concept_map: Dict[str, List[str]] = {}
-    concept_written: set[str] = set()
-    clones_needed: Dict[str, str] = {}  # clone -> base
+    c_parts_by_code: Dict[str, List[str]] = {}      # OLD/otros -> parts (recortados)
+    c_lines: List[Tuple[str, List[str]]] = []       # (~C, parts) para re-emisión selectiva
+    d_records: List[Tuple[str, List[str]]] = []     # (parent, chunks)
+    other_lines: List[str] = []
 
     for raw in lines:
         if raw.startswith("~C|"):
-            head, rest = raw.split("|", 1)
+            _, rest = raw.split("|", 1)
             parts = trim_trailing_empty(rest.rstrip("\n").split("|"))
             if parts:
-                old = parts[0]
-                base_new = code_map.get(old, old)
-                parts[0] = base_new
-                if base_new not in concept_map:
-                    concept_map[base_new] = parts.copy()
-                if base_new not in concept_written:
-                    out.append(f"{head}|{'|'.join(parts)}|")
-                    concept_written.add(base_new)
+                code = parts[0]
+                c_parts_by_code[code] = parts
+                c_lines.append(("~C", parts))
             continue
-
         if raw.startswith("~D|"):
-            # ~D|PADRE|hijo\coef\cant\hijo\...\|
             _, rest = raw.split("|", 1)
-            parent_code, child_part = rest.split("|", 1)
+            parent, child_part = rest.split("|", 1)
             chunks = child_part.rstrip("|").split("\\")
-
-            # 1) Descompone en triples y aplica mapping base
-            triples: List[tuple[str, str, str, str]] = []
-            for i in range(0, len(chunks), 3):
-                old = chunks[i].strip() if i < len(chunks) else ""
-                if not old:
-                    continue
-                coef = chunks[i + 1] if i + 1 < len(chunks) else ""
-                qty = chunks[i + 2] if i + 2 < len(chunks) else ""
-                base = code_map.get(old, old)
-                triples.append((old, base, coef, qty))
-
-            # 2) Detección de colisiones por base entre OLD distintos
-            group_old: Dict[str, List[str]] = {}
-            for old, base, _, _ in triples:
-                group_old.setdefault(base, []).append(old)
-
-            # 3) Construye chunks nuevos; añade sufijo a/b/c solo si >1 OLD distinto
-            seen_per_base: Dict[str, int] = {}
-            new_chunks: List[str] = []
-            for old, base, coef, qty in triples:
-                final = base
-                olds = group_old.get(base, [])
-                if len(set(olds)) > 1:
-                    seen_per_base[base] = seen_per_base.get(base, 0) + 1
-                    idx = seen_per_base[base]
-                    if idx > 1:
-                        final = with_letter(base, idx)
-                        clones_needed[final] = base
-                new_chunks.extend([final, coef, qty])
-
-            # 4) ENSURE trailing backslash before final '|'
-            body = "\\".join(new_chunks) + "\\"
-            out.append(f"~D|{parent_code}|{body}|")
+            d_records.append((parent, chunks))
             continue
+        other_lines.append(raw)
 
-        # Resto: solo sustituye códigos sin tocar delimitadores
-        line = raw
-        for old, new in code_map.items():
-            line = re.sub(rf"{re.escape(old)}(?=[\\|])", new, line)
-        out.append(line)
+    # 2) Reescribimos ~D por partida aplicando:
+    #    - mapping OLD->BASE
+    #    - sufijo por hermanos (1º sin sufijo; 2º->a, 3º->b, ...)
+    #    - construimos un índice final_code -> parts_origen (para emitir ~C de destino)
+    new_D_lines: List[str] = []
+    final_code_parts: Dict[str, List[str]] = {}  # código final -> parts del ORIGEN que lo originó
+    used_in_D: set[str] = set()
 
-    # Añadir ~C clonados a partir del concepto base (ya con campos recortados)
-    for clone_code, base_code in clones_needed.items():
-        base_parts = concept_map.get(base_code)
-        if not base_parts:
+    for parent, chunks in d_records:
+        # 2.1 descompone en triples ordenados
+        triples: List[Tuple[str, str, str, str]] = []  # (old, base, coef, qty)
+        for i in range(0, len(chunks), 3):
+            old = chunks[i].strip() if i < len(chunks) else ""
+            if not old:
+                continue
+            coef = chunks[i + 1] if i + 1 < len(chunks) else ""
+            qty = chunks[i + 2] if i + 2 < len(chunks) else ""
+            base = code_map.get(old, old)
+            triples.append((old, base, coef, qty))
+
+        # 2.2 detectar colisiones entre HERMANOS por BASE (en esta partida)
+        olds_by_base: Dict[str, List[str]] = {}
+        for old, base, _, _ in triples:
+            olds_by_base.setdefault(base, []).append(old)
+
+        # 2.3 reescribir preservando el orden; 1º sin sufijo, 2º→a, etc.
+        seen_idx_per_base: Dict[str, int] = {}
+        new_chunks: List[str] = []
+
+        for old, base, coef, qty in triples:
+            final_code = base
+            olds_here = olds_by_base.get(base, [])
+            if len(set(olds_here)) > 1:
+                seen_idx_per_base[base] = seen_idx_per_base.get(base, 0) + 1
+                idx = seen_idx_per_base[base]
+                if idx > 1:
+                    final_code = with_letter(base, idx)
+
+            # apuntar los parts del ORIGEN que definen este código final (price lock)
+            parts_old = c_parts_by_code.get(old)
+            if parts_old:  # sólo si tenemos ~C origen
+                final_code_parts.setdefault(final_code, parts_old)
+
+            new_chunks.extend([final_code, coef, qty])
+            used_in_D.add(final_code)
+
+        body = "\\".join(new_chunks) + "\\"
+        new_D_lines.append(f"~D|{parent}|{body}|")
+
+    # 3) Reconstruimos ~C:
+    #    - NO emitimos ~C de códigos OLD mapeados (se sustituyen)
+    #    - NO emitimos ~C de códigos que vamos a volver a escribir como destino
+    #    - Emitimos ~C de destino (final_code_parts) heredando los parts del ORIGEN
+    mapped_olds = set(code_map.keys())
+    planned_dest = used_in_D  # todos los códigos finales citados en ~D
+
+    out: List[str] = []
+    out.extend(other_lines)  # el resto tal cual
+
+    written_c: set[str] = set()
+
+    # 3.1 reemitimos ~C no afectados
+    for _tag, parts in c_lines:
+        code = parts[0]
+        if code in mapped_olds:           # OLD mapeado -> lo sustituimos (no reemitir)
             continue
-        parts = base_parts.copy()
-        parts[0] = clone_code
+        if code in planned_dest:          # lo vamos a escribir como destino -> evitar duplicado
+            continue
+        if code in written_c:
+            continue
         parts = trim_trailing_empty(parts)
-        out.append(f"~C|{'|'.join(parts)}|")
+        out.append("~C|" + "|".join(parts) + "|")
+        written_c.add(code)
+
+    # 3.2 emitimos ~C de destino con parts del ORIGEN (price lock)
+    for final_code, parts_src in final_code_parts.items():
+        if final_code in written_c:
+            continue
+        p = parts_src.copy()
+        p[0] = final_code
+        p = trim_trailing_empty(p)
+        out.append("~C|" + "|".join(p) + "|")
+        written_c.add(final_code)
+
+    # 4) Añadimos las ~D nuevas (todas con barra invertida final)
+    out.extend(new_D_lines)
 
     Path(path).write_text("\n".join(out) + "\n", encoding="latin-1", errors="ignore")
 

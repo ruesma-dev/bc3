@@ -44,3 +44,7 @@ MAP_KINDS = {"des_mo", "des_maq", "des_mat"}
 DISCOUNT_PRODUCT_CODE: str = "DESCUENTO"
 
 REPARSE_AFTER_REWRITE = True
+
+# config/settings.py  (añade al final si quieres poder desactivar el clonado)
+PRICE_LOCK_MODE = os.getenv("PRICE_LOCK_MODE", "clone_on_conflict")  # 'clone_on_conflict' | 'first_wins'
+
