@@ -37,6 +37,9 @@ class Node:
             ch.compute_total()
 
 
+# --------------------------------------------------------------------------- #
+#                       helpers                                               #
+# --------------------------------------------------------------------------- #
 def _kind(code: str, t: str) -> str:
     if "##" in code:
         return "supercapítulo"
@@ -49,7 +52,16 @@ def _num(v: str) -> float | None:
     return float(v.replace(",", ".")) if v and _NUM.match(v) else None
 
 
+# --------------------------------------------------------------------------- #
+#         PASADA EXTRA – des huérfano  y  partida sin hijos                   #
+# --------------------------------------------------------------------------- #
 def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
+    """
+    Reglas:
+      A) Partida sin hijos → crear clon .1 SIEMPRE,
+         y el precio del clon = precio de la partida (si existe).
+      B) Descompuestos huérfanos junto a partidas → elevar a partida y clonar .1.
+    """
     parent_of = {ch.code: p.code for p in nodes.values() for ch in p.children}
     roots = [n for n in nodes.values() if n.code not in parent_of]
 
@@ -57,9 +69,11 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
         for ch in n.children:
             dfs(ch)
 
+        # --- regla A: partida sin hijos -> clonar siempre -------------------
         if n.kind == "partida" and not n.children:
             _create_clone(n)
 
+        # --- regla B: descompuestos huérfanos junto a partidas -------------
         bros = n.children
         if bros and any(b.kind == "partida" for b in bros):
             for des in bros:
@@ -72,15 +86,16 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
         clone_code = (parent.code + ".1")[:20]
         if any(c.code == clone_code for c in parent.children):
             return
+        clone_price = parent.precio if (parent.precio is not None) else 1.0
         clone = Node(
             code=clone_code,
             description=parent.description,
             long_desc=parent.long_desc,
             kind="des_mat",
             unidad=parent.unidad,
-            precio=1.0,
+            precio=clone_price,      # ← precio del clon = precio de la partida
             can_pres=1.0,
-            imp_pres=1.0,
+            imp_pres=None,
         )
         clone.compute_total()
         parent.add_child(clone)
@@ -89,8 +104,11 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
         dfs(r)
 
 
-def _rewrite_bc3(path: Path, nodes: Dict[str, Node], *, encoding: str = "latin-1") -> None:
-    lines = path.read_text(encoding, errors="ignore").splitlines(keepends=True)
+# --------------------------------------------------------------------------- #
+#           Re-escribir modificaciones en la copia BC3                       #
+# --------------------------------------------------------------------------- #
+def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
+    lines = path.read_text("latin-1", errors="ignore").splitlines(keepends=True)
     out: list[str] = []
     done: set[str] = set()
 
@@ -104,16 +122,18 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node], *, encoding: str = "latin-1
             code = parts[0]
             node = nodes.get(code)
 
+            # nodos partida (convertidos o ya partidas) que tienen clon .1
             if node and node.kind == "partida" and any(c.code.endswith(".1") for c in node.children):
-                parts[5] = "0"              # tipo partida
+                parts[5] = "0"  # tipo partida
                 out.append("~C|" + "|".join(parts) + "|\n")
 
                 for clone in node.children:
                     if clone.code not in done and clone.code.endswith(".1"):
                         clone_parts = parts.copy()
                         clone_parts[0] = clone.code
-                        clone_parts[3] = "1"   # precio 1
-                        clone_parts[4] = "1"   # fecha 1
+                        # precio del clon = precio de la partida en el ~C original
+                        clone_parts[3] = parts[3] if len(parts) > 3 else "1"
+                        clone_parts[4] = "1"   # mantenemos como estaba (no cambiamos comportamiento)
                         clone_parts[5] = "3"   # material
                         out.append("~C|" + "|".join(clone_parts) + "|\n")
                         out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1|\n")
@@ -122,31 +142,35 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node], *, encoding: str = "latin-1
 
         out.append(ln)
 
-    path.write_text("".join(out), encoding, errors="ignore")
+    path.write_text("".join(out), "latin-1", errors="ignore")
 
 
-def build_tree(
-    bc3_path: Path,
-    *,
-    create_clones: bool = True,
-    rewrite_bc3: bool = True,
-    encoding: str = "latin-1",
-) -> List[Node]:
+# --------------------------------------------------------------------------- #
+#                           PARSER PRINCIPAL                                  #
+# --------------------------------------------------------------------------- #
+def build_tree(bc3_path: Path) -> List[Node]:
     nodes: Dict[str, Node] = {}
     parents: Dict[str, str] = {}
     qty_map: Dict[str, float] = {}
     meas_map: Dict[str, List[str]] = defaultdict(list)
 
-    with bc3_path.open("r", encoding=encoding, errors="ignore") as fh:
+    with bc3_path.open("r", encoding="latin-1", errors="ignore") as fh:
         for raw in fh:
             tag = raw[:2]
 
             if tag == "~C":
                 _, rest = raw.split("|", 1)
                 code, unidad, desc, pres, _, t = rest.rstrip("\n").split("|")[:6]
+
+                # Fallback: si T∈{0,1,2,3}, no es estructural (sin '#') y la
+                # descripción corta está vacía, usar el código como descripción.
+                desc_clean = clean_text(desc)
+                if (t in {"0", "1", "2", "3"}) and ("#" not in code) and not desc_clean.strip():
+                    desc_clean = code
+
                 nodes[code] = Node(
                     code=code,
-                    description=clean_text(desc),
+                    description=desc_clean,
                     kind=_kind(code, t),
                     unidad=unidad or None,
                     precio=_num(pres),
@@ -189,13 +213,11 @@ def build_tree(
             n.measurements = meas_map[c]
         n.compute_total()
 
-    # pasada extra
-    if create_clones:
-        _add_missing_clones(nodes)
+    # pasada extra (descompuestos huérfanos y partidas sin hijos)
+    _add_missing_clones(nodes)
 
     # escribir cambios en BC3
-    if rewrite_bc3:
-        _rewrite_bc3(bc3_path, nodes, encoding=encoding)
+    _rewrite_bc3(bc3_path, nodes)
 
     # raíces
     child_codes = {c.code for n in nodes.values() for c in n.children}
