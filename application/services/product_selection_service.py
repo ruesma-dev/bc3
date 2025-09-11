@@ -258,13 +258,25 @@ def build_product_code_mapping_batch(
 
 # ───────────────────────── Reescritura BC3 (con sufijos) ────────────────────
 def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None:
+    r"""
+    Reescritura conservando rendimiento y precio UNITARIO del descompuesto original.
+
+    • Para cada descompuesto mapeado se crea una VARIANTE GLOBAL del código base
+      según la tupla (base, desc_corta, unidad, precio, desc_larga).
+    • La variante copia: descripción corta/larga, UNIDAD y PRECIO del descompuesto original.
+    • Las ~D mantienen coeficiente y cantidad ORIGINAL (sin ajustes).
+    • En la MISMA ~D, si se repite la variante: clones locales a/b/c... (copian la variante).
+    • Solo saneamos ~C de productos. Capítulos/partidas no se tocan.
+    • Todos los ~D acaban con barra invertida y tubería («\|»).
+    """
     if not code_map:
         return
 
+    MAX_CODE_LEN = 20
     letters = "abcdefghijklmnopqrstuvwxyz"
 
     def letter_at(idx: int) -> str:
-        j = idx - 2  # 2->a, 3->b...
+        j = idx - 2
         return letters[j] if 0 <= j < len(letters) else f"x{idx}"
 
     def with_letter(base: str, idx: int) -> str:
@@ -276,122 +288,245 @@ def rewrite_bc3_with_product_codes(path: Path, code_map: Dict[str, str]) -> None
             i -= 1
         return fields[:i]
 
-    # 1) Leemos todo y guardamos:
-    #   - ~C originales por código (para tomar UD/Precio/Texto del ORIGEN)
-    #   - ~D por partida
-    #   - resto de líneas tal cual
+    def sanitize_c_parts(parts: List[str], *, for_product: bool) -> List[str]:
+        # [code, unidad, desc, precio, fecha, tipo]
+        parts = (parts + [""] * 6)[:6]
+        if for_product:
+            if not parts[1].strip():
+                parts[1] = "UD"
+            if not str(parts[3]).strip():
+                parts[3] = "0"
+            if not str(parts[5]).strip():
+                parts[5] = "3"
+        return parts
+
+    # ───────── Parse ─────────
     lines = path.read_text("latin-1", errors="ignore").splitlines()
-    c_parts_by_code: Dict[str, List[str]] = {}      # OLD/otros -> parts (recortados)
-    c_lines: List[Tuple[str, List[str]]] = []       # (~C, parts) para re-emisión selectiva
-    d_records: List[Tuple[str, List[str]]] = []     # (parent, chunks)
+
+    c_parts_by_code: Dict[str, List[str]] = {}     # ~C por código (deduplicado)
+    t_text_by_code: Dict[str, str] = {}            # ~T (primera) por código
+    c_lines: List[Tuple[str, List[str]]] = []      # (~C, parts) (para conservar orden aproximado)
+    t_lines: List[Tuple[str, str]] = []            # (~T, raw)
+    d_records: List[Tuple[str, List[str]]] = []    # (parent, chunks)
     other_lines: List[str] = []
+
+    def _tipo(prts: List[str]) -> str:
+        return (prts + [""] * 6)[5]
+
+    def _c_priority(prts: List[str]) -> int:
+        """
+        Priorizamos:
+          3) Código con '##' (supercapítulo)
+          2) Código con '#'  (capítulo)
+          1) Tipo '0' (partida)
+          0) Resto (1/2/3/…)
+        """
+        code = prts[0] if prts else ""
+        if "##" in code:
+            return 3
+        if "#" in code:
+            return 2
+        if _tipo(prts) == "0":
+            return 1
+        return 0
 
     for raw in lines:
         if raw.startswith("~C|"):
+            # ~C|code|unidad|desc|precio|fecha|tipo|... (recortamos vacíos al final)
             _, rest = raw.split("|", 1)
-            parts = trim_trailing_empty(rest.rstrip("\n").split("|"))
+            parts = rest.rstrip("\n").split("|")
+            # quita trailing vacíos para no confundir el comparador
+            i = len(parts)
+            while i > 0 and parts[i - 1] == "":
+                i -= 1
+            parts = parts[:i] if i else parts
+
             if parts:
                 code = parts[0]
-                c_parts_by_code[code] = parts
-                c_lines.append(("~C", parts))
+                # Si no existe, guardamos la primera aparición
+                if code not in c_parts_by_code:
+                    c_parts_by_code[code] = parts
+                    c_lines.append(("~C", parts))
+                else:
+                    # Si ya existe, solo sustituimos si la nueva tiene MAYOR prioridad
+                    # (pero nunca dejamos que una T=3 pise a una T=0 o capítulo)
+                    old = c_parts_by_code[code]
+                    if _c_priority(parts) > _c_priority(old):
+                        c_parts_by_code[code] = parts
+                        # actualizamos también c_lines (sustituimos la última tupla de ese code)
+                        for idx in range(len(c_lines) - 1, -1, -1):
+                            if c_lines[idx][1][0] == code:
+                                c_lines[idx] = ("~C", parts)
+                                break
             continue
+
+        if raw.startswith("~T|"):
+            _, rest = raw.split("|", 1)
+            code, txt = (rest.rstrip("\n").split("|", 1) + [""])[:2]
+            # Nos quedamos con la PRIMERA ~T que aparece para ese código
+            if code not in t_text_by_code:
+                t_text_by_code[code] = txt
+            t_lines.append(("~T", raw.rstrip("\n")))
+            continue
+
         if raw.startswith("~D|"):
             _, rest = raw.split("|", 1)
             parent, child_part = rest.split("|", 1)
             chunks = child_part.rstrip("|").split("\\")
             d_records.append((parent, chunks))
             continue
+
         other_lines.append(raw)
 
-    # 2) Reescribimos ~D por partida aplicando:
-    #    - mapping OLD->BASE
-    #    - sufijo por hermanos (1º sin sufijo; 2º->a, 3º->b, ...)
-    #    - construimos un índice final_code -> parts_origen (para emitir ~C de destino)
-    new_D_lines: List[str] = []
-    final_code_parts: Dict[str, List[str]] = {}  # código final -> parts del ORIGEN que lo originó
+    # ───────── Variantes globales por (base, desc, unidad, precio[, long]) ─────────
+    variant_code_by_key: Dict[Tuple[str, str, str, str, str], str] = {}
+    variant_parts: Dict[str, List[str]] = {}     # ~C parts de cada variante
+    variant_long_text: Dict[str, str] = {}       # ~T de cada variante
+    base_variant_counter: Dict[str, int] = {}
+
+    def ensure_variant_for(old_code: str, base: str) -> str:
+        # datos originales del descompuesto
+        src = c_parts_by_code.get(old_code, [old_code, "UD", "", "0", "", "3"])
+        src = sanitize_c_parts(src, for_product=True).copy()
+        short = (src[2] or "").strip()
+        unit  = (src[1] or "").strip()
+        price = (src[3] or "").strip()
+        longt = (t_text_by_code.get(old_code, "") or "").strip()
+        key = (base, short, unit, price, longt)
+
+        if key in variant_code_by_key:
+            return variant_code_by_key[key]
+
+        # Asignar código de variante global
+        if base not in base_variant_counter:
+            code = base
+            base_variant_counter[base] = 1
+        else:
+            base_variant_counter[base] += 1
+            code = with_letter(base, base_variant_counter[base])
+
+        # Construir ~C de variante copiando EXACTAMENTE unidad, desc y precio del original
+        vp = ["", "", "", "", "", ""]
+        vp[0] = code
+        vp[1] = unit or "UD"
+        vp[2] = short
+        vp[3] = price or "0"
+        vp[4] = (src[4] or "")             # fecha si venía
+        vp[5] = "3"                        # forzamos material
+        variant_parts[code] = vp
+
+        if longt:
+            variant_long_text[code] = longt
+
+        variant_code_by_key[key] = code
+        return code
+
+    # ───────── Reescritura ~D (sin tocar coef ni qty) ─────────
     used_in_D: set[str] = set()
+    clones_needed: Dict[str, str] = {}    # clone -> variant
+    new_D_lines: List[str] = []
 
     for parent, chunks in d_records:
-        # 2.1 descompone en triples ordenados
-        triples: List[Tuple[str, str, str, str]] = []  # (old, base, coef, qty)
+        # preparar triples
+        triples: List[Tuple[str, str, str, str]] = []
         for i in range(0, len(chunks), 3):
             old = chunks[i].strip() if i < len(chunks) else ""
             if not old:
                 continue
             coef = chunks[i + 1] if i + 1 < len(chunks) else ""
-            qty = chunks[i + 2] if i + 2 < len(chunks) else ""
+            qty  = chunks[i + 2] if i + 2 < len(chunks) else ""
             base = code_map.get(old, old)
             triples.append((old, base, coef, qty))
 
-        # 2.2 detectar colisiones entre HERMANOS por BASE (en esta partida)
-        olds_by_base: Dict[str, List[str]] = {}
-        for old, base, _, _ in triples:
-            olds_by_base.setdefault(base, []).append(old)
-
-        # 2.3 reescribir preservando el orden; 1º sin sufijo, 2º→a, etc.
-        seen_idx_per_base: Dict[str, int] = {}
+        seen_local: Dict[str, int] = {}
         new_chunks: List[str] = []
 
         for old, base, coef, qty in triples:
-            final_code = base
-            olds_here = olds_by_base.get(base, [])
-            if len(set(olds_here)) > 1:
-                seen_idx_per_base[base] = seen_idx_per_base.get(base, 0) + 1
-                idx = seen_idx_per_base[base]
-                if idx > 1:
-                    final_code = with_letter(base, idx)
+            vcode = ensure_variant_for(old, base)
 
-            # apuntar los parts del ORIGEN que definen este código final (price lock)
-            parts_old = c_parts_by_code.get(old)
-            if parts_old:  # sólo si tenemos ~C origen
-                final_code_parts.setdefault(final_code, parts_old)
+            # evitar colapso entre hermanos en ESTA ~D
+            final = vcode
+            seen_local[final] = seen_local.get(final, 0) + 1
+            if seen_local[final] > 1:
+                clone = with_letter(vcode, seen_local[final])
+                clones_needed[clone] = vcode
+                final = clone
 
-            new_chunks.extend([final_code, coef, qty])
-            used_in_D.add(final_code)
+            new_chunks.extend([final, coef, qty])  # coef y qty ORIGINALES
+            used_in_D.add(final)
 
         body = "\\".join(new_chunks) + "\\"
         new_D_lines.append(f"~D|{parent}|{body}|")
 
-    # 3) Reconstruimos ~C:
-    #    - NO emitimos ~C de códigos OLD mapeados (se sustituyen)
-    #    - NO emitimos ~C de códigos que vamos a volver a escribir como destino
-    #    - Emitimos ~C de destino (final_code_parts) heredando los parts del ORIGEN
+    # ───────── Reconstrucción ~C y ~T ─────────
     mapped_olds = set(code_map.keys())
-    planned_dest = used_in_D  # todos los códigos finales citados en ~D
+    planned_dest = used_in_D | set(variant_parts.keys()) | set(clones_needed.keys())
 
     out: List[str] = []
-    out.extend(other_lines)  # el resto tal cual
-
+    out.extend(other_lines)
     written_c: set[str] = set()
+    written_t: set[str] = set()
 
-    # 3.1 reemitimos ~C no afectados
+    # 1) ~C no afectados (capítulos/partidas…) → no tocar tipo/unidad
     for _tag, parts in c_lines:
         code = parts[0]
-        if code in mapped_olds:           # OLD mapeado -> lo sustituimos (no reemitir)
+        if code in mapped_olds:
             continue
-        if code in planned_dest:          # lo vamos a escribir como destino -> evitar duplicado
+        if code in planned_dest:
             continue
         if code in written_c:
             continue
-        parts = trim_trailing_empty(parts)
-        out.append("~C|" + "|".join(parts) + "|")
+        p = sanitize_c_parts(parts, for_product=False)
+        out.append("~C|" + "|".join(p) + "|")
         written_c.add(code)
 
-    # 3.2 emitimos ~C de destino con parts del ORIGEN (price lock)
-    for final_code, parts_src in final_code_parts.items():
-        if final_code in written_c:
+    # 2) ~C de variantes (unidad, desc y precio del ORIGINAL)
+    for vcode, vparts in sorted(variant_parts.items()):
+        if vcode not in used_in_D or vcode in written_c:
             continue
-        p = parts_src.copy()
-        p[0] = final_code
-        p = trim_trailing_empty(p)
+        p = sanitize_c_parts(vparts, for_product=True)
+        p[0] = vcode
         out.append("~C|" + "|".join(p) + "|")
-        written_c.add(final_code)
+        written_c.add(vcode)
 
-    # 4) Añadimos las ~D nuevas (todas con barra invertida final)
+    # 3) ~C de clones (copian la variante)
+    for clone, vcode in sorted(clones_needed.items()):
+        if clone in written_c:
+            continue
+        base_v = variant_parts.get(vcode)
+        if not base_v:
+            continue
+        p = sanitize_c_parts(base_v, for_product=True)
+        p[0] = clone
+        out.append("~C|" + "|".join(p) + "|")
+        written_c.add(clone)
+
+    # 4) ~T no afectados
+    for _tag, raw in t_lines:
+        code = raw.split("|", 2)[1]
+        if code in mapped_olds:
+            continue
+        if code in planned_dest:
+            continue
+        if code in written_t:
+            continue
+        out.append(raw + "|") if not raw.endswith("|") else out.append(raw)
+        written_t.add(code)
+
+    # 5) ~T para variantes y clones (larga original)
+    for vcode, txt in sorted(variant_long_text.items()):
+        if vcode in used_in_D and vcode not in written_t:
+            out.append(f"~T|{vcode}|{txt}")
+            written_t.add(vcode)
+    for clone, vcode in sorted(clones_needed.items()):
+        if vcode in variant_long_text and clone not in written_t:
+            out.append(f"~T|{clone}|{variant_long_text[vcode]}")
+            written_t.add(clone)
+
+    # 6) ~D reescritos
     out.extend(new_D_lines)
 
     Path(path).write_text("\n".join(out) + "\n", encoding="latin-1", errors="ignore")
-
 
 def apply_code_mapping_to_nodes(roots: List[Node], code_map: Dict[str, str]) -> None:
     """

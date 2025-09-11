@@ -78,7 +78,6 @@ def convert_to_material(src: Path, dst: Path) -> None:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # patrón global para sustituir códigos antes de \ o |
     repl_pattern = re.compile(
         r"(" + "|".join(re.escape(k) for k in code_map.keys()) + r")(?=[\\|])"
     ) if code_map else None
@@ -89,43 +88,47 @@ def convert_to_material(src: Path, dst: Path) -> None:
         for raw in fin:
             line = raw
 
-            # ---------------------------  ~C  --------------------------------
             if raw.startswith("~C|"):
                 head, rest = raw.split("|", 1)
                 parts = rest.rstrip("\n").split("|")
                 if len(parts) >= 6:
                     code, unidad, desc, pres, *_r, tipo = parts[:6]
 
-                    # truncado de código
+                    # — truncado de código —
                     if code in code_map:
                         parts[0] = code_map[code]
                         code = parts[0]
 
-                    # regla de descompuestos originales (T 1/2/3)
+                    # — 1/2/3 ⇒ material —
                     if tipo in {"1", "2", "3"}:
                         parts[5] = "3"
                         tipo = "3"
 
-                    # NUEVA regla: si está en la rama de una partida ⇒ material
+                    # — rama de partida ⇒ material —
                     if code in force_mat:
                         parts[5] = "3"
                         tipo = "3"
 
-                    # unidad vacía en partida / descompuesto
+                    # — unidad vacía en partida/descompuesto —
                     if tipo in {"0", "1", "2", "3"} and not unidad.strip():
                         parts[1] = "UD"
 
-                    # limpieza de descripción
+                    # — limpieza de descripción —
                     parts[2] = clean_text(parts[2])
+
+                    # ✅ NUEVA REGLA:
+                    # si es descompuesto (ya normalizado a T=3) y la descripción corta está vacía,
+                    # usar el código como descripción (coherente con el truncado aplicado).
+                    if parts[5] == "3" and not parts[2].strip():
+                        parts[2] = parts[0]
 
                     line = f"{head}|{'|'.join(parts)}|\n"
 
-            # ------------------ resto de líneas ( ~D, ~M, … ) -----------------
             else:
                 if repl_pattern:
                     line = repl_pattern.sub(
                         lambda m: code_map[m.group(1)], raw.rstrip("\n")
                     ) + "\n"
 
-            # limpieza final de tildes y símbolos
+            # limpieza final (acentos/control)
             fout.write(clean_text(line))
