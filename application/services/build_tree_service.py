@@ -37,9 +37,6 @@ class Node:
             ch.compute_total()
 
 
-# --------------------------------------------------------------------------- #
-#                       helpers                                               #
-# --------------------------------------------------------------------------- #
 def _kind(code: str, t: str) -> str:
     if "##" in code:
         return "supercapítulo"
@@ -52,9 +49,6 @@ def _num(v: str) -> float | None:
     return float(v.replace(",", ".")) if v and _NUM.match(v) else None
 
 
-# --------------------------------------------------------------------------- #
-#         PASADA EXTRA – des huérfano  y  partida sin hijos                   #
-# --------------------------------------------------------------------------- #
 def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
     parent_of = {ch.code: p.code for p in nodes.values() for ch in p.children}
     roots = [n for n in nodes.values() if n.code not in parent_of]
@@ -63,11 +57,9 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
         for ch in n.children:
             dfs(ch)
 
-        # --- regla A: partidas ya presentes ---------------------------------
         if n.kind == "partida" and not n.children:
             _create_clone(n)
 
-        # --- regla B: descompuestos huérfanos junto a partidas -------------
         bros = n.children
         if bros and any(b.kind == "partida" for b in bros):
             for des in bros:
@@ -97,11 +89,8 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
         dfs(r)
 
 
-# --------------------------------------------------------------------------- #
-#           Re‑escribir modificaciones en la copia BC3                       #
-# --------------------------------------------------------------------------- #
-def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
-    lines = path.read_text("latin-1", errors="ignore").splitlines(keepends=True)
+def _rewrite_bc3(path: Path, nodes: Dict[str, Node], *, encoding: str = "latin-1") -> None:
+    lines = path.read_text(encoding, errors="ignore").splitlines(keepends=True)
     out: list[str] = []
     done: set[str] = set()
 
@@ -115,7 +104,6 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
             code = parts[0]
             node = nodes.get(code)
 
-            # nodos partida (convertidos o ya partidas) que tienen clon .1
             if node and node.kind == "partida" and any(c.code.endswith(".1") for c in node.children):
                 parts[5] = "0"              # tipo partida
                 out.append("~C|" + "|".join(parts) + "|\n")
@@ -134,19 +122,22 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
 
         out.append(ln)
 
-    path.write_text("".join(out), "latin-1", errors="ignore")
+    path.write_text("".join(out), encoding, errors="ignore")
 
 
-# --------------------------------------------------------------------------- #
-#                           PARSER PRINCIPAL                                  #
-# --------------------------------------------------------------------------- #
-def build_tree(bc3_path: Path) -> List[Node]:
+def build_tree(
+    bc3_path: Path,
+    *,
+    create_clones: bool = True,
+    rewrite_bc3: bool = True,
+    encoding: str = "latin-1",
+) -> List[Node]:
     nodes: Dict[str, Node] = {}
     parents: Dict[str, str] = {}
     qty_map: Dict[str, float] = {}
     meas_map: Dict[str, List[str]] = defaultdict(list)
 
-    with bc3_path.open("r", encoding="latin-1", errors="ignore") as fh:
+    with bc3_path.open("r", encoding=encoding, errors="ignore") as fh:
         for raw in fh:
             tag = raw[:2]
 
@@ -198,11 +189,13 @@ def build_tree(bc3_path: Path) -> List[Node]:
             n.measurements = meas_map[c]
         n.compute_total()
 
-    # pasada extra (descompuestos huérfanos y partidas sin hijos)
-    _add_missing_clones(nodes)
+    # pasada extra
+    if create_clones:
+        _add_missing_clones(nodes)
 
     # escribir cambios en BC3
-    _rewrite_bc3(bc3_path, nodes)
+    if rewrite_bc3:
+        _rewrite_bc3(bc3_path, nodes, encoding=encoding)
 
     # raíces
     child_codes = {c.code for n in nodes.values() for c in n.children}

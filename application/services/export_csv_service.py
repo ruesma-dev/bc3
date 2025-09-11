@@ -1,9 +1,4 @@
 # application/services/export_csv_service.py
-# ===========================================================
-# Crea un DataFrame a partir del árbol y lo exporta a CSV (;)
-# con las columnas solicitadas, incluida la descripción larga.
-# ===========================================================
-
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -11,9 +6,6 @@ import pandas as pd
 from application.services.build_tree_service import Node
 
 
-# --------------------------------------------------------------------------- #
-#                          ÁRBOL → FILAS                                      #
-# --------------------------------------------------------------------------- #
 def _flatten(node: Node, acc: List[Dict[str, Any]]) -> None:
     acc.append(
         {
@@ -33,10 +25,7 @@ def _flatten(node: Node, acc: List[Dict[str, Any]]) -> None:
         _flatten(ch, acc)
 
 
-# --------------------------------------------------------------------------- #
-#                          EXPORTAR A CSV                                     #
-# --------------------------------------------------------------------------- #
-def export_to_csv(roots: List[Node], csv_path: Path) -> None:
+def export_to_csv(roots: List[Node], csv_path: Path, sep: str = ";") -> None:
     rows: List[Dict[str, Any]] = []
     for r in roots:
         _flatten(r, rows)
@@ -56,4 +45,4 @@ def export_to_csv(roots: List[Node], csv_path: Path) -> None:
             "mediciones",
         ],
     )
-    df.to_csv(csv_path, sep=";", index=False, encoding="utf-8")
+    df.to_csv(csv_path, sep=sep, index=False, encoding="utf-8")
