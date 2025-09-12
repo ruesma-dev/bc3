@@ -52,6 +52,14 @@ def _num(v: str) -> float | None:
     return float(v.replace(",", ".")) if v and _NUM.match(v) else None
 
 
+def _fmt_price_str(value: float | None) -> str:
+    """Devuelve un str sin notación científica y con punto decimal si aplica."""
+    if value is None:
+        return ""
+    s = f"{value:.15g}"
+    return s.replace(",", ".")
+
+
 # --------------------------------------------------------------------------- #
 #         PASADA EXTRA – des huérfano  y  partida sin hijos                   #
 # --------------------------------------------------------------------------- #
@@ -93,7 +101,7 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
             long_desc=parent.long_desc,
             kind="des_mat",
             unidad=parent.unidad,
-            precio=clone_price,      # ← precio del clon = precio de la partida
+            precio=clone_price,      # precio del clon = precio de la partida
             can_pres=1.0,
             imp_pres=None,
         )
@@ -108,7 +116,29 @@ def _add_missing_clones(nodes: Dict[str, "Node"]) -> None:
 #           Re-escribir modificaciones en la copia BC3                       #
 # --------------------------------------------------------------------------- #
 def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
+    """
+    Inserta en el BC3 los clones '.1' de partidas:
+      - Mantiene 'tipo' de la partida en 0
+      - Crea un ~C del clon con:
+          * precio = precio del padre (si disponible) o precio del Node clon
+          * fecha  = fecha del padre (si disponible)
+          * tipo   = 3 (material)
+      - Crea el ~D padre→clon con can=1, coef=1, etc.
+      - Evita duplicar: no inserta el clon si ya existe un ~C con ese código.
+    """
+    # Leemos y, ANTES de tocar nada, indexamos los códigos ~C ya presentes
     lines = path.read_text("latin-1", errors="ignore").splitlines(keepends=True)
+    existing_c_codes: set[str] = set()
+    for raw in lines:
+        if raw.startswith("~C|"):
+            try:
+                _, rest = raw.split("|", 1)
+                code = rest.split("|", 1)[0]
+                existing_c_codes.add(code)
+            except Exception:
+                # línea malformada: la dejamos pasar
+                pass
+
     out: list[str] = []
     done: set[str] = set()
 
@@ -124,20 +154,43 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
 
             # nodos partida (convertidos o ya partidas) que tienen clon .1
             if node and node.kind == "partida" and any(c.code.endswith(".1") for c in node.children):
-                parts[5] = "0"  # tipo partida
+                # Forzamos a tipo partida (0) y escribimos el ~C original
+                parts[5] = "0"
                 out.append("~C|" + "|".join(parts) + "|\n")
 
+                # Para cada clon .1 que aún no hayamos escrito:
                 for clone in node.children:
-                    if clone.code not in done and clone.code.endswith(".1"):
-                        clone_parts = parts.copy()
-                        clone_parts[0] = clone.code
-                        # precio del clon = precio de la partida en el ~C original
-                        clone_parts[3] = parts[3] if len(parts) > 3 else "1"
-                        clone_parts[4] = "1"   # mantenemos como estaba (no cambiamos comportamiento)
-                        clone_parts[5] = "3"   # material
-                        out.append("~C|" + "|".join(clone_parts) + "|\n")
-                        out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1|\n")
+                    if not clone.code.endswith(".1"):
+                        continue
+                    if clone.code in done:
+                        continue
+                    # EVITAR DUPLICADOS ENTRE EJECUCIONES:
+                    if clone.code in existing_c_codes:
+                        # Ya existe un ~C con ese código en el fichero → NO lo reinsertamos
                         done.add(clone.code)
+                        continue
+
+                    clone_parts = parts.copy()
+                    clone_parts[0] = clone.code
+
+                    # --- precio del clon -------------------------------
+                    parent_price_str = parts[3] if len(parts) > 3 else ""
+                    if parent_price_str and parent_price_str.strip():
+                        clone_price_str = parent_price_str.strip()
+                    else:
+                        clone_price_str = _fmt_price_str(clone.precio) or "1"
+                    clone_parts[3] = clone_price_str
+
+                    # --- fecha del clon = fecha del padre (si existe) ---
+                    parent_date_str = parts[4] if len(parts) > 4 else ""
+                    clone_parts[4] = parent_date_str.strip() if parent_date_str else "1"
+
+                    # --- tipo del clon = material -----------------------
+                    clone_parts[5] = "3"
+
+                    out.append("~C|" + "|".join(clone_parts) + "|\n")
+                    out.append(f"~D|{node.code}|{clone.code}\\1\\1\\1|\n")
+                    done.add(clone.code)
                 continue
 
         out.append(ln)
