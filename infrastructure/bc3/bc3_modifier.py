@@ -165,9 +165,10 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     if orig_tipo == "0" and tipo == "3":
                         parts[3] = price_map.get(parts[0], price_map.get(code, pres))
 
-                    # unidad vacía en partida / descompuesto (NO aplicar a estructurales)
+                    # >>> FIX: unidad vacía en partida / descompuesto (NO aplicar a estructurales)
+                    # Antes: parts[1] = "UD"
                     if (tipo in {"0", "1", "2", "3"}) and (not is_structural) and not (unidad or "").strip():
-                        parts[1] = "UD"
+                        parts[1] = "U"
 
                     # descripción: si vacía y no estructural, usar el código
                     desc_clean = clean_text(desc)

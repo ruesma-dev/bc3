@@ -39,7 +39,7 @@ from tkinter import ttk
 
 from interface_adapters.controllers.etl_controller import run_etl
 
-VERSION = "0.92"
+VERSION = "0.93"
 
 # Pillow opcional (para mejor reescalado del PNG)
 try:
