@@ -11,6 +11,7 @@ except Exception:
     pass
 
 from application.services.phase2_code_mapper import run_phase2
+from utils.timer import timer
 
 # --- Ruta por defecto para la FASE 2: salida de la FASE 1 ---
 #    (puedes cambiarla si tu proyecto está en otro directorio)
@@ -60,5 +61,7 @@ if __name__ == "__main__":
         _usage()
         sys.exit(3)
 
-    out = run_phase2(bc3_in, catalog_xlsx, bc3_out)
+    with timer("FASE 2 (clasificación + reescritura)"):
+        out = run_phase2(bc3_in, catalog_xlsx, bc3_out)
+
     print(f"BC3 clasificado → {out.resolve()}")

@@ -24,6 +24,7 @@ from application.pipeline.steps import (
     PrintTreeStep,
     ExportCsvStep,
 )
+from utils.timer import Stopwatch
 
 
 def run_etl(
@@ -42,6 +43,7 @@ def run_etl(
         export_csv:     genera CSV si True.
     """
     # 1) Cargar settings (desde .env) y permitir override del fichero de entrada
+    sw = Stopwatch()
     settings = Settings()
     if input_filename:
         # Settings está congelado (frozen=True); usamos replace() para clonar con override
@@ -57,3 +59,4 @@ def run_etl(
     # 3) Ejecutar
     ctx = ETLContext(settings=settings)
     pipeline.run(ctx)
+    print(sw.report("ETL – tiempos"))
