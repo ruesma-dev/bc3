@@ -1,466 +1,632 @@
 # interface_adapters/gui/gui_app.py
 from __future__ import annotations
 
-"""
-GUI para BC3 ETL (Windows/Linux/Mac)
-- Selector de fichero .bc3 (solo muestra *.bc3 / *.BC3)
-- Botón grande "CONVERTIR"
-- Barra de progreso indeterminada
-- Área de log con banners finales: VERDE "TERMINADO" / ROJO "FAIL"
-- Abre la carpeta del input con "Abrir output"
-- Salida junto al input: <base>_limpio.bc3 y <base>_tree.csv
-- Trabaja en directorio temporal (no ensucia el proyecto)
-- Versión mostrada abajo a la derecha (v0.92)
-- Carga robusta del logo PNG tanto en desarrollo como congelado (PyInstaller onefile/onedir)
-"""
-
-import io
 import os
-import queue
-import shutil
 import sys
-import tempfile
 import threading
-import time
-from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import List, Optional, Any, Callable
+
 import tkinter as tk
-from tkinter import (
-    filedialog,
-    messagebox,
-    Tk,
-    StringVar,
-    Text,
-    END,
-    DISABLED,
-    NORMAL,
-)
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
-from interface_adapters.controllers.etl_controller import run_etl
+# --- Núcleo Fase 1 (limpieza) ---
+from infrastructure.bc3.bc3_modifier import convert_to_material
+from application.services.build_tree_service import build_tree
+from application.services.export_csv_service import export_to_csv
 
-VERSION = "0.93"
-
-# Pillow opcional (para mejor reescalado del PNG)
+# --- Fase 2 (IA) opcional ---
 try:
-    from PIL import Image, ImageTk  # type: ignore
-    _PIL_OK = True
+    from application.services.phase2_code_mapper import run_phase2  # type: ignore
+    HAS_PHASE2 = True
 except Exception:
-    _PIL_OK = False
+    HAS_PHASE2 = False
 
 
-def _find_logo_path() -> Path | None:
+# --------------------------------------------------------------------------- #
+#  Configuración visual y presets                                             #
+# --------------------------------------------------------------------------- #
+APP_VERSION = "0.97"
+APP_TITLE = "Limpieza de BC3"
+
+# Nombres de fichero aceptados por defecto para el catálogo IA externo
+DEFAULT_CATALOG_BASENAMES = ["catalogo_productos.xlsx", "catalogo.xlsx"]
+
+# Rutas “típicas” en desarrollo (cuando NO es ejecutable PyInstaller)
+DEV_LOGO_PATHS = [
+    "interface_adapters/gui/assets/logo.png",
+    "resources/logo.png",
+]
+DEV_CATALOG_PATHS = [
+    "config/catalogo_productos.xlsx",
+    "resources/catalogo_productos.xlsx",
+]
+
+# Modelos Gemini (free tier) y límites orientativos
+MODEL_PRESETS = {
+    "gemini-2.5-pro":        {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
+    "gemini-2.5-flash":      {"RPM": 10, "TPM": 250_000,  "RPD": 250},
+    "gemini-2.5-flash-lite": {"RPM": 15, "TPM": 250_000,  "RPD": 1000},
+    "gemini-2.0-flash":      {"RPM": 15, "TPM": 1_000_000, "RPD": 200},
+    "gemini-2.0-flash-lite": {"RPM": 30, "TPM": 1_000_000, "RPD": 200},
+}
+DEFAULT_MODEL = "gemini-2.5-flash"
+
+
+# --------------------------------------------------------------------------- #
+#  Utilidades de recursos                                                     #
+# --------------------------------------------------------------------------- #
+def _is_frozen() -> bool:
+    """True si se ejecuta como .exe empaquetado (PyInstaller)."""
+    return getattr(sys, "frozen", False)
+
+
+def _project_root() -> Path:
+    """Raíz del proyecto (modo dev) o carpeta temporal en empaquetado."""
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parents[2]
+
+
+def _candidate_catalog_paths() -> List[Path]:
     """
-    Intenta localizar 'logo.png' en varios destinos:
-      - Desarrollo: interface_adapters/gui/assets/logo.png (relativo a este archivo)
-      - PyInstaller onefile: {sys._MEIPASS}/interface_adapters/gui/assets/logo.png
-      - PyInstaller onedir: {carpeta del exe}/interface_adapters/gui/assets/logo.png
-      - (fallback) .../assets/logo.png en las dos ubicaciones anteriores
-    Devuelve la primera ruta existente o None.
+    Posibles ubicaciones del catálogo IA (en orden de prioridad):
+      1) Variable de entorno BC3_CATALOG_PATH
+      2) En empaquetado: <_MEIPASS>/resources/<basename>
+      3) Junto al ejecutable o subcarpetas {resources, catalog, config}
+      4) Rutas relativas típicas de desarrollo (DEV_CATALOG_PATHS)
     """
-    candidates: list[Path] = []
+    cands: List[Path] = []
 
-    # 1) Desarrollo: junto al código fuente
-    here = Path(__file__).parent
-    candidates.append(here / "assets" / "logo.png")
+    # (1) ENV
+    env_path = os.getenv("BC3_CATALOG_PATH")
+    if env_path:
+        cands.append(Path(env_path))
 
-    # 2) Congelado (onefile): carpeta temporal _MEIPASS
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        base = Path(meipass)
-        candidates.append(base / "interface_adapters" / "gui" / "assets" / "logo.png")
-        candidates.append(base / "assets" / "logo.png")
+    # (2) En empaquetado (onefile)
+    if hasattr(sys, "_MEIPASS"):
+        base_pack = Path(sys._MEIPASS)
+        for b in DEFAULT_CATALOG_BASENAMES:
+            cands.append(base_pack / "resources" / b)
 
-    # 3) Congelado (onedir): junto al ejecutable
-    if getattr(sys, "frozen", False):
-        exedir = Path(sys.executable).parent
-        candidates.append(exedir / "interface_adapters" / "gui" / "assets" / "logo.png")
-        candidates.append(exedir / "assets" / "logo.png")
+    # (3) Junto al exe / cwd
+    exe_dir = Path(sys.executable).parent if _is_frozen() else Path.cwd()
+    for b in DEFAULT_CATALOG_BASENAMES:
+        cands.append(exe_dir / b)
+        cands.append(exe_dir / "resources" / b)
+        cands.append(exe_dir / "catalog" / b)
+        cands.append(exe_dir / "config" / b)
 
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
+    # (4) Desarrollo
+    root = _project_root()
+    for p in DEV_CATALOG_PATHS:
+        cands.append(root / p)
 
-
-@dataclass
-class AppPaths:
-    project_root: Path
-    input_dir: Path
-    output_dir: Path
-
-    @staticmethod
-    def discover() -> "AppPaths":
-        root = Path.cwd()
-        return AppPaths(
-            project_root=root,
-            input_dir=root / "input",
-            output_dir=root / "output",
-        )
+    return cands
 
 
-class StdCapture:
-    """Captura stdout/stderr y lo envía a una cola para mostrar en la UI."""
-
-    def __init__(self, q: queue.Queue[str], tee: bool = True):
-        self.q = q
-        self.buf = io.StringIO()
-        self.tee = tee
-        self.old_out = None
-        the_old_err = None  # no se usa, pero mantenemos la estructura
-        self.old_err = the_old_err
-
-    def write(self, data: str) -> None:
-        # buffer + encolar por líneas
-        self.buf.write(data)
-        for chunk in data.splitlines(True):
-            self.q.put(chunk)
-        if self.tee and self.old_out:
-            self.old_out.write(data)
-
-    def flush(self) -> None:
-        if self.old_out:
-            self.old_out.flush()
-
-    def __enter__(self):
-        self.old_out = sys.stdout
-        self.old_err = sys.stderr
-        sys.stdout = self
-        sys.stderr = self
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout = self.old_out
-        sys.stderr = self.old_err
-
-
-class BC3GUI:
-    def __init__(self, root: Tk):
-        self.root = root
-        self.root.title("BC3 ETL – Conversor")
-        self.root.minsize(840, 560)
-
-        # Paths internos (el ETL trabaja en tmp; no dejamos nada en el proyecto)
-        self.paths = AppPaths.discover()
-        self.paths.input_dir.mkdir(parents=True, exist_ok=True)
-        self.paths.output_dir.mkdir(parents=True, exist_ok=True)
+# --------------------------------------------------------------------------- #
+#  Aplicación                                                                 #
+# --------------------------------------------------------------------------- #
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("1000x680")
+        self.minsize(920, 590)
 
         # Estado
-        self.selected_path = StringVar(value="")
-        self.status_text = StringVar(value="Listo.")
-        self.is_running = False
-        self.log_queue: queue.Queue[str] = queue.Queue()
-        self.last_dest_dir: Path | None = None  # carpeta del input seleccionado
-        self._logo_image = None  # mantener referencia para evitar GC
-        self._logo_path: Path | None = _find_logo_path()
+        self.input_path: Optional[Path] = None
+        self.catalog_path: Optional[Path] = None
+        self.last_output_dir: Optional[Path] = None
+        self.model_name: str = DEFAULT_MODEL
+        self.model_limits = MODEL_PRESETS[self.model_name].copy()
 
-        # UI
-        self._build_style()
-        self._build_ui()
+        # Estilos
+        self._init_styles()
 
-        # Poll logs
-        self._poll_log_queue()
+        # Layout raíz
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-    # ---------- UI ----------
+        self._build_header()
+        self._build_body()
+        self._build_footer()
 
-    def _build_style(self) -> None:
-        style = ttk.Style()
+        # ENV para fase 2
+        self._apply_model_env()
+
+        # Precarga de catálogo IA
+        self._auto_load_catalog()
+
+    # --------------------------- estilos / header --------------------------- #
+    def _init_styles(self) -> None:
+        self.style = ttk.Style(self)
         try:
-            style.theme_use("clam")
+            self.style.theme_use("clam")
         except Exception:
             pass
-        style.configure("Primary.TButton", font=("Segoe UI", 14, "bold"), padding=12)
-        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"))
-        style.configure("Status.TLabel", foreground="#555")
+        self.style.configure("Primary.TButton", padding=10, font=("Segoe UI", 11, "bold"))
+        self.style.configure("Secondary.TButton", padding=8, font=("Segoe UI", 10))
+        self.style.configure("Card.TFrame", relief="groove", borderwidth=1)
+        self.style.configure("BannerSuccess.TLabel", font=("Segoe UI", 14, "bold"), foreground="#0F8F3B")
+        self.style.configure("BannerFail.TLabel", font=("Segoe UI", 14, "bold"), foreground="#B00020")
 
-    def _build_ui(self) -> None:
-        # Header con logo y título
-        header = ttk.Frame(self.root, padding=(12, 10))
-        header.pack(fill="x")
+    def _build_header(self) -> None:
+        header = ttk.Frame(self, padding=(14, 10))
+        header.grid(row=0, column=0, sticky="ew")
 
-        logo_lbl = self._maybe_add_logo(header, height_px=42)
-        if logo_lbl is not None:
-            logo_lbl.pack(side="left", padx=(0, 10))
+        # columnas: 0=título/subtítulo | 1=expansor | 2=versión | 3=logo
+        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=1)
+        header.columnconfigure(2, weight=0)
+        header.columnconfigure(3, weight=0)
 
-        ttk.Label(header, text="BC3 ETL – Conversor", style="Title.TLabel").pack(
-            side="left"
-        )
+        # Título / subtítulo
+        tk.Label(header, text=APP_TITLE, font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            header,
+            text="1ª pasada: Limpieza •  2ª pasada: Asignación de productos (IA)",
+            font=("Segoe UI", 10),
+        ).grid(row=1, column=0, sticky="w")
 
-        # Top: selector de fichero
-        top = ttk.Frame(self.root, padding=(12, 0, 12, 12))
-        top.pack(fill="x")
+        # Versión
+        tk.Label(header, text=f"v{APP_VERSION}", font=("Segoe UI", 10)).grid(row=0, column=2, sticky="ne", padx=(0, 8))
 
-        ttk.Label(top, text="Fichero BC3:", width=12).pack(side="left")
-        self.entry_path = ttk.Entry(top, textvariable=self.selected_path)
-        self.entry_path.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ttk.Button(top, text="Seleccionar…", command=self._on_browse).pack(
-            side="left"
-        )
+        # Logo (reducido y en esquina superior derecha)
+        logo_path = self._resolve_resource_first(DEV_LOGO_PATHS, packaged_subdir="resources")
+        if logo_path and logo_path.exists():
+            try:
+                self.logo_img = self._load_logo_small(logo_path, max_w=200, max_h=48)
+                tk.Label(header, image=self.logo_img).grid(row=0, column=3, rowspan=2, sticky="ne")
+            except Exception:
+                pass
 
-        # Middle: acciones
-        mid = ttk.Frame(self.root, padding=(12, 6))
-        mid.pack(fill="x")
+    def _load_logo_small(self, path: Path, max_w: int = 200, max_h: int = 48) -> tk.PhotoImage:
+        """
+        Carga un PNG y lo reduce por factor entero (subsample) para que no exceda
+        max_w × max_h. No requiere Pillow.
+        """
+        img = tk.PhotoImage(file=str(path))
+        w, h = img.width(), img.height()
+        if w <= max_w and h <= max_h:
+            return img
+        # factor entero de reducción (ceil)
+        fx = (w + max_w - 1) // max_w
+        fy = (h + max_h - 1) // max_h
+        f = max(1, fx, fy)
+        return img.subsample(f, f)
 
-        self.btn_convert = ttk.Button(
-            mid,
-            text="CONVERTIR",
-            style="Primary.TButton",
-            command=self._on_convert_clicked,
-        )
-        self.btn_convert.pack(side="left")
+    def _resolve_resource_first(self, candidates: List[str], packaged_subdir: Optional[str] = None) -> Optional[Path]:
+        """
+        Busca el primer recurso disponible:
+          • en ejecutable: <_MEIPASS>/<packaged_subdir>/<basename>
+          • en desarrollo: rutas relativas a la raíz del proyecto
+        """
+        base = _project_root()
 
-        self.progress = ttk.Progressbar(mid, mode="indeterminate")
-        self.progress.pack(side="left", fill="x", expand=True, padx=12)
+        if hasattr(sys, "_MEIPASS") and packaged_subdir:
+            for c in candidates:
+                p = base / packaged_subdir / Path(c).name
+                if p.exists():
+                    return p
 
-        ttk.Button(mid, text="Abrir output", command=self._open_output).pack(
-            side="right"
-        )
+        for c in candidates:
+            p = (base / c).resolve()
+            if p.exists():
+                return p
 
-        # Log area
-        log_frame = ttk.LabelFrame(self.root, text="Ejecución", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        return None
 
-        self.txt_log: Text = Text(log_frame, wrap="word", height=16)
-        self.txt_log.pack(fill="both", expand=True)
-        self.txt_log.configure(state=DISABLED)
+    # ------------------------------ body ----------------------------------- #
+    def _build_body(self) -> None:
+        body = ttk.Frame(self, padding=(14, 0))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
 
-        # Tags para banners de éxito / error y centrado
-        self.txt_log.tag_configure(
-            "success",
-            foreground="#2e7d32",
-            font=("Segoe UI", 20, "bold"),
-            justify="center",
-        )
-        self.txt_log.tag_configure(
-            "error",
-            foreground="#c62828",
-            font=("Segoe UI", 20, "bold"),
-            justify="center",
-        )
-        self.txt_log.tag_configure("center", justify="center")
+        # --- Card entradas ---
+        card = ttk.Frame(body, style="Card.TFrame", padding=12)
+        card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for i in range(8):
+            card.columnconfigure(i, weight=0)
+        card.columnconfigure(1, weight=1)
+        card.columnconfigure(4, weight=1)
 
-        # Status bar
-        status = ttk.Frame(self.root, padding=(12, 6))
-        status.pack(fill="x")
-        self.lbl_status = ttk.Label(
-            status, textvariable=self.status_text, style="Status.TLabel"
-        )
-        self.lbl_status.pack(side="left")
+        ttk.Label(card, text="Fichero BC3:", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=(4, 8))
+        self.entry_input = ttk.Entry(card)
+        self.entry_input.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.btn_browse_input = ttk.Button(card, text="Buscar…", command=self._on_browse_input)
+        self.btn_browse_input.grid(row=0, column=2, sticky="ew")
+
+        ttk.Label(card, text="Catálogo (IA):", font=("Segoe UI", 10, "bold")).grid(row=0, column=3, sticky="w", padx=(16, 8))
+        self.entry_catalog = ttk.Entry(card)
+        self.entry_catalog.grid(row=0, column=4, sticky="ew", padx=(0, 8))
+        self.btn_browse_catalog = ttk.Button(card, text="Buscar…", command=self._on_browse_catalog)
+        self.btn_browse_catalog.grid(row=0, column=5, sticky="ew")
+
+        ttk.Label(card, text="Modelo IA:", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w", padx=(4, 8), pady=(10, 0))
+        self.model_var = tk.StringVar(value=self.model_name)
+        self.cmb_model = ttk.Combobox(card, textvariable=self.model_var, state="readonly",
+                                      values=list(MODEL_PRESETS.keys()), width=24)
+        self.cmb_model.grid(row=1, column=1, sticky="w", pady=(10, 0))
+        self.cmb_model.bind("<<ComboboxSelected>>", self._on_model_change)
+
+        self.lbl_limits = ttk.Label(card, text=self._limits_text(), font=("Segoe UI", 9))
+        self.lbl_limits.grid(row=1, column=2, columnspan=4, sticky="w", pady=(10, 0), padx=(10, 0))
+
+        # --- Acciones ---
+        actions = ttk.Frame(body, padding=(0, 4))
+        actions.grid(row=1, column=0, sticky="e")
+
+        self.btn_clean = ttk.Button(actions, text="LIMPIAR (1ª pasada)",
+                                    command=self._run_clean_clicked, style="Primary.TButton")
+        self.btn_clean.grid(row=0, column=0, padx=(0, 8))
+
+        self.btn_phase2 = ttk.Button(actions, text="ASIGNAR PRODUCTOS (IA)",
+                                     command=self._run_phase2_clicked, style="Secondary.TButton",
+                                     state=("normal" if HAS_PHASE2 else "disabled"))
+        self.btn_phase2.grid(row=0, column=1)
+
+        # --- Log ---
+        log_card = ttk.Frame(body, style="Card.TFrame", padding=12)
+        log_card.grid(row=2, column=0, sticky="nsew")
+        log_card.columnconfigure(0, weight=1)
+        log_card.rowconfigure(1, weight=1)
+
+        ttk.Label(log_card, text="Log de ejecución", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        self.txt_log = tk.Text(log_card, height=18, wrap="word", font=("Consolas", 10))
+        self.txt_log.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
+        self._init_log_tags()
+
+        log_buttons = ttk.Frame(log_card)
+        log_buttons.grid(row=2, column=0, sticky="e")
+        ttk.Button(log_buttons, text="Abrir carpeta output", command=self._open_output_folder).grid(row=0, column=0)
+
+    def _build_footer(self) -> None:
+        footer = ttk.Frame(self, padding=(14, 8))
+        footer.grid(row=2, column=0, sticky="ew")
         ttk.Label(
-            status, text=f"v{VERSION}", style="Status.TLabel", anchor="e", width=10
-        ).pack(side="right")
+            footer,
+            text="Hecho para presupuestos BC3 • Arquitectura limpia • Python 3.12",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
 
-    # ---------- Logo ----------
+    # ----------------------------- utilidades -------------------------------- #
+    def _limits_text(self) -> str:
+        L = self.model_limits
+        return f"Límites (Free): RPM={L['RPM']}, TPM={L['TPM']:,}, RPD={L['RPD']}"
 
-    def _maybe_add_logo(self, parent: ttk.Frame, height_px: int = 40):
-        """
-        Intenta cargar y mostrar un logo PNG. Devuelve el Label si se pudo crear; si no, None.
-        """
-        try:
-            if not self._logo_path or not self._logo_path.exists():
-                return None
+    def _apply_model_env(self) -> None:
+        os.environ["GEMINI_MODEL_NAME"] = self.model_name
+        os.environ["GEMINI_RPM"] = str(self.model_limits["RPM"])
 
-            if _PIL_OK:
-                img = Image.open(self._logo_path)
-                # mantener relación de aspecto, reescalar a altura deseada
-                if img.height != height_px:
-                    ratio = height_px / max(1, img.height)
-                    new_size = (max(1, int(img.width * ratio)), height_px)
-                    img = img.resize(new_size, Image.LANCZOS)
-                self._logo_image = ImageTk.PhotoImage(img)
-            else:
-                # Fallback sin PIL (Tk 8.6 soporta PNG)
-                self._logo_image = tk.PhotoImage(file=str(self._logo_path))
-                # Si es muy grande, hacer subsample entero aproximado
-                h = self._logo_image.height()
-                if h > height_px:
-                    factor = max(1, round(h / height_px))
-                    self._logo_image = self._logo_image.subsample(factor, factor)
+    def _init_log_tags(self) -> None:
+        self.txt_log.tag_configure("time", foreground="#555")
+        self.txt_log.tag_configure("ok", foreground="#0F8F3B")
+        self.txt_log.tag_configure("err", foreground="#B00020")
+        self.txt_log.tag_configure("banner_ok", font=("Segoe UI", 16, "bold"), foreground="#0F8F3B",
+                                   spacing1=10, spacing3=10, justify="center")
+        self.txt_log.tag_configure("banner_fail", font=("Segoe UI", 16, "bold"), foreground="#B00020",
+                                   spacing1=10, spacing3=10, justify="center")
 
-            return ttk.Label(parent, image=self._logo_image)
+    def _append(self, msg: str, tag: Optional[str] = None) -> None:
+        """Inserta en log (llamar siempre desde el hilo principal)."""
+        ts = datetime.now().strftime("[%H:%M:%S] ")
+        self.txt_log.insert("end", ts, ("time",))
+        self.txt_log.insert("end", msg + "\n", (tag,) if tag else ())
+        self.txt_log.see("end")
 
-        except Exception:
-            return None
+    def _append_async(self, msg: str, tag: Optional[str] = None) -> None:
+        """Programar inserción de log desde un hilo de trabajo."""
+        self.after(0, lambda: self._append(msg, tag))
 
-    # ---------- Actions ----------
+    def _append_banner(self, text: str, ok: bool = True) -> None:
+        self.txt_log.insert("end", "\n")
+        self.txt_log.insert("end", text + "\n", ("banner_ok" if ok else "banner_fail",))
+        self.txt_log.insert("end", "\n")
+        self.txt_log.see("end")
 
-    def _on_browse(self) -> None:
-        # Solo mostrar *.bc3 / *.BC3
-        fp = filedialog.askopenfilename(
-            title="Selecciona un fichero BC3",
-            filetypes=[("FIEBDC-3 / BC3", "*.bc3 *.BC3")],
-            defaultextension=".bc3",
-        )
-        if fp:
-            self.selected_path.set(fp)
-            self.last_dest_dir = Path(fp).parent
-            self._append_log(f"Seleccionado: {fp}\n")
+    def _append_banner_async(self, text: str, ok: bool = True) -> None:
+        self.after(0, lambda: self._append_banner(text, ok))
 
     def _clear_log(self) -> None:
-        """Limpia el área de logs y reinicia la cola de mensajes."""
-        self.txt_log.configure(state=NORMAL)
-        self.txt_log.delete("1.0", END)
-        self.txt_log.configure(state=DISABLED)
-        self.log_queue = queue.Queue()
+        self.txt_log.delete("1.0", "end")
 
-    def _on_convert_clicked(self) -> None:
-        if self.is_running:
+    def _disable_actions(self) -> None:
+        self.btn_clean.config(state="disabled")
+        self.btn_phase2.config(state="disabled")
+        self.btn_browse_input.config(state="disabled")
+        self.btn_browse_catalog.config(state="disabled")
+        self.cmb_model.config(state="disabled")
+
+    def _enable_actions(self) -> None:
+        self.btn_clean.config(state="normal")
+        if HAS_PHASE2:
+            self.btn_phase2.config(state="normal")
+        self.btn_browse_input.config(state="normal")
+        self.btn_browse_catalog.config(state="normal")
+        self.cmb_model.config(state="readonly")
+
+    # ----------------------- carga automática catálogo ----------------------- #
+    def _auto_load_catalog(self) -> None:
+        # Si ya hay algo en el Entry (p.ej. última sesión), respetamos
+        current = self.entry_catalog.get().strip()
+        if current and Path(current).exists():
+            self.catalog_path = Path(current)
             return
-        src = self.selected_path.get().strip()
-        if not src:
-            messagebox.showwarning("BC3 ETL", "Selecciona primero un fichero .bc3")
-            return
-        if not Path(src).exists():
-            messagebox.showerror("BC3 ETL", "La ruta seleccionada no existe.")
-            return
 
-        # Limpiar log antes de una nueva ejecución
-        self._clear_log()
-
-        # Lanzar en hilo para no bloquear la UI
-        t = threading.Thread(target=self._run_pipeline_thread, args=(Path(src),), daemon=True)
-        self.is_running = True
-        self.progress.start(10)
-        self.status_text.set("Procesando…")
-        self.btn_convert.configure(state=DISABLED)
-        t.start()
-
-    def _open_output(self) -> None:
-        try:
-            # Abrir SIEMPRE la carpeta del input seleccionado
-            dest_dir = self.last_dest_dir or (
-                Path(self.selected_path.get()).parent if self.selected_path.get() else None
-            )
-            if not dest_dir:
-                messagebox.showinfo(
-                    "BC3 ETL",
-                    "Selecciona primero un fichero para conocer su carpeta.",
-                )
+        for path in _candidate_catalog_paths():
+            if path.exists():
+                self.catalog_path = path
+                self.entry_catalog.delete(0, "end")
+                self.entry_catalog.insert(0, str(path))
+                self._append(f"Catálogo IA precargado: {path}", tag="ok")
                 return
-            path = str(dest_dir.resolve())
-            if sys.platform.startswith("win"):
-                os.startfile(path)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                os.system(f'open "{path}"')
-            else:
-                os.system(f'xdg-open "{path}"')
-        except Exception as exc:
-            messagebox.showinfo("BC3 ETL", f"No se pudo abrir la carpeta:\n{exc}")
 
-    # ---------- Pipeline thread ----------
+        # No encontrado: mostramos rutas probadas
+        tried = "\n  - " + "\n  - ".join(str(p) for p in _candidate_catalog_paths())
+        self._append(
+            "Aviso: no se encontró el catálogo IA por defecto. "
+            "Puedes seleccionarlo manualmente desde 'Buscar…'.\nRutas probadas:" + tried,
+            tag="err",
+        )
 
-    def _run_pipeline_thread(self, source_path: Path) -> None:
-        """
-        Ejecuta el ETL en un directorio temporal aislado (con subcarpetas input/output),
-        después copia los resultados a la misma carpeta del fichero seleccionado:
-          - <base>_limpio.bc3
-          - <base>_tree.csv
-        """
+    # ------------------------------ eventos UI ------------------------------ #
+    def _on_browse_input(self) -> None:
+        fn = filedialog.askopenfilename(
+            title="Selecciona un fichero BC3",
+            filetypes=[("Ficheros BC3", "*.bc3")],
+        )
+        if fn:
+            self.input_path = Path(fn)
+            self.entry_input.delete(0, "end")
+            self.entry_input.insert(0, str(self.input_path))
+            self.last_output_dir = self.input_path.parent
+
+    def _on_browse_catalog(self) -> None:
+        fn = filedialog.askopenfilename(
+            title="Selecciona catálogo (Excel/CSV)",
+            filetypes=[
+                ("Excel", "*.xlsx"),
+                ("Excel (97-2003)", "*.xls"),
+                ("CSV", "*.csv"),
+                ("Todos", "*.*"),
+            ],
+        )
+        if fn:
+            self.catalog_path = Path(fn)
+            self.entry_catalog.delete(0, "end")
+            self.entry_catalog.insert(0, str(self.catalog_path))
+
+    def _on_model_change(self, _evt=None) -> None:
+        sel = self.model_var.get()
+        if sel in MODEL_PRESETS:
+            self.model_name = sel
+            self.model_limits = MODEL_PRESETS[sel].copy()
+            self.lbl_limits.config(text=self._limits_text())
+            self._apply_model_env()
+            self._append(f"Modelo IA seleccionado: {sel}  →  {self._limits_text()}")
+
+    # ------------------------------- acciones -------------------------------- #
+    def _run_clean_clicked(self) -> None:
+        if not self._ensure_input():
+            return
+        self._clear_log()
+        self._append("Iniciando 1ª pasada (Limpieza BC3)…")
+        self._disable_actions()
+        threading.Thread(target=self._run_clean_thread, daemon=True).start()
+
+    def _run_phase2_clicked(self) -> None:
+        if not self._ensure_input():
+            return
+        cleaned = self._cleaned_bc3_path()
+        if not cleaned.exists():
+            messagebox.showerror("Fase 2 (IA)", f"No encuentro el BC3 limpio:\n{cleaned}\n\nEjecuta antes la 1ª pasada.")
+            return
+        if not self._ensure_catalog():
+            return
+        self._clear_log()
+        self._append(f"Iniciando 2ª pasada (IA) con modelo {self.model_name} …")
+        self._disable_actions()
+        threading.Thread(target=self._run_phase2_thread, args=(cleaned,), daemon=True).start()
+
+    # --------------------------- lógica de ejecución ------------------------ #
+    def _run_clean_thread(self) -> None:
+        ok = True
         try:
-            dest_dir = source_path.parent
-            self.last_dest_dir = dest_dir
-            base = source_path.stem
+            src = self.input_path
+            out_dir = src.parent
+            self.last_output_dir = out_dir
 
-            with StdCapture(self.log_queue, tee=False):
-                print(f"Origen: {source_path}")
+            cleaned_bc3 = self._cleaned_bc3_path()
+            tree_csv = out_dir / f"{src.stem}_tree.csv"
 
-                with tempfile.TemporaryDirectory(prefix="bc3gui_") as tmpdir:
-                    tmp_root = Path(tmpdir)
-                    tmp_input = tmp_root / "input"
-                    tmp_output = tmp_root / "output"
-                    tmp_input.mkdir(parents=True, exist_ok=True)
-                    tmp_output.mkdir(parents=True, exist_ok=True)
+            self._append_async(f"Normalizando BC3 → {cleaned_bc3.name}")
+            convert_to_material(src, cleaned_bc3)
 
-                    # Copiamos al input temporal con el nombre que espera el ETL
-                    tmp_bc3 = tmp_input / "presupuesto.bc3"
-                    shutil.copyfile(source_path, tmp_bc3)
-                    print(f"Trabajo temporal: {tmp_root}")
+            self._append_async(f"Construyendo árbol y exportando CSV → {tree_csv.name}")
+            roots = build_tree(cleaned_bc3)
+            export_to_csv(roots, tree_csv)
 
-                    # Ejecutar ETL desde el tmp_root
-                    old_cwd = Path.cwd()
-                    try:
-                        os.chdir(tmp_root)
-                        start = time.time()
-                        run_etl(input_filename=tmp_bc3.name)
-                        elapsed = time.time() - start
-                        print(f"✅ Conversión finalizada en {elapsed:.2f}s")
-                    finally:
-                        os.chdir(old_cwd)
+            self._append_async(f"Guardado: {cleaned_bc3}")
+            self._append_async(f"Guardado: {tree_csv}")
 
-                    # Outputs internos generados por el ETL
-                    internal_bc3 = tmp_output / "presupuesto_material.bc3"
-                    internal_csv = tmp_output / "presupuesto_tree.csv"
+        except Exception as e:
+            ok = False
+            self._append_async(f"ERROR: {e}", tag="err")
+        finally:
+            self._enable_actions()
+            self._append_banner_async("TERMINADO" if ok else "FAIL", ok=ok)
 
-                    # Destino final (misma carpeta que el input seleccionado)
-                    dest_bc3 = dest_dir / f"{base}_limpio.bc3"
-                    dest_csv = dest_dir / f"{base}_tree.csv"
+    # ---- helpers para progreso IA ----
+    @staticmethod
+    def _count_descompuestos_in_bc3(path: Path) -> int:
+        """
+        Cuenta líneas ~C con tipo en {1,2,3} (descompuestos) — estimación de total a procesar.
+        """
+        total = 0
+        with path.open("r", encoding="latin-1", errors="ignore") as fh:
+            for raw in fh:
+                if raw.startswith("~C|"):
+                    parts = raw.rstrip("\n").split("|")
+                    if len(parts) >= 7:
+                        tipo = parts[6]  # índice 6 porque la línea tiene "~C|", luego code, unidad, desc, precio, fecha, tipo, ...
+                        if tipo in {"1", "2", "3"}:
+                            total += 1
+        return total
 
-                    copied_any = False
-                    if internal_bc3.exists():
-                        shutil.copyfile(internal_bc3, dest_bc3)
-                        print(f"Guardado: {dest_bc3}")
-                        copied_any = True
-                    else:
-                        print("⚠ No se encontró 'presupuesto_material.bc3' en trabajo temporal.")
-
-                    if internal_csv.exists():
-                        shutil.copyfile(internal_csv, dest_csv)
-                        print(f"Guardado: {dest_csv}")
-                        copied_any = True
-                    else:
-                        print("⚠ No se encontró 'presupuesto_tree.csv' en trabajo temporal.")
-
-                    if copied_any:
-                        print(f"📁 Output: {dest_dir}")
-
-            # Fin correcto → banner verde
-            self.root.after(0, self._on_pipeline_done, True, None)
-
-        except Exception as exc:
-            # Error → banner rojo
-            self.log_queue.put(f"\n[ERROR] {exc}\n")
-            self.root.after(0, self._on_pipeline_done, False, exc)
-
-    def _on_pipeline_done(self, ok: bool, exc: Exception | None) -> None:
-        self.is_running = False
-        self.progress.stop()
-        self.btn_convert.configure(state=NORMAL)
-
-        # Mostrar banner en el log
-        if ok:
-            self.status_text.set("Completado.")
-            self._append_banner("TERMINADO", tag="success")
-        else:
-            self.status_text.set("Error en la conversión.")
-            self._append_banner("FAIL", tag="error")
-            messagebox.showerror("BC3 ETL", f"Ocurrió un error:\n{exc}")
-
-    # ---------- Logging ----------
-
-    def _append_log(self, text: str) -> None:
-        self.txt_log.configure(state=NORMAL)
-        self.txt_log.insert(END, text)
-        self.txt_log.see(END)
-        self.txt_log.configure(state=DISABLED)
-
-    def _append_banner(self, text: str, tag: str) -> None:
-        self.txt_log.configure(state=NORMAL)
-        self.txt_log.insert(END, "\n\n")
-        self.txt_log.insert(END, f"{text}\n", (tag, "center"))
-        self.txt_log.see(END)
-        self.txt_log.configure(state=DISABLED)
-
-    def _poll_log_queue(self) -> None:
+    @staticmethod
+    def _format_progress_event(ev: Any, idx: int, total: int) -> str:
+        """
+        Formatea eventos de progreso heterogéneos:
+        - str: se imprime tal cual con contador
+        - dict: intenta usar keys {old_code,new_code,confidence,desc}
+        - tuple/list: intenta (old,new,conf)
+        """
+        prefix = f"IA {idx}/{total} | "
         try:
-            while True:
-                chunk = self.log_queue.get_nowait()
-                self._append_log(chunk)
-        except queue.Empty:
+            if isinstance(ev, str):
+                return prefix + ev
+            if isinstance(ev, dict):
+                oldc = ev.get("old_code") or ev.get("code") or ev.get("from") or "?"
+                newc = ev.get("new_code") or ev.get("mapped_code") or ev.get("to") or "?"
+                conf = ev.get("confidence")
+                if conf is None:
+                    return f"{prefix}{oldc} → {newc}"
+                return f"{prefix}{oldc} → {newc} ({float(conf):.2f})"
+            if isinstance(ev, (tuple, list)) and len(ev) >= 2:
+                oldc = ev[0]
+                newc = ev[1]
+                conf = ev[2] if len(ev) >= 3 else None
+                if conf is None:
+                    return f"{prefix}{oldc} → {newc}"
+                return f"{prefix}{oldc} → {newc} ({float(conf):.2f})"
+        except Exception:
             pass
-        self.root.after(60, self._poll_log_queue)
+        # Fallback genérico
+        return prefix + repr(ev)
+
+    def _run_phase2_thread(self, cleaned_bc3: Path) -> None:
+        ok = True
+        try:
+            out_phase2 = cleaned_bc3.with_name(cleaned_bc3.stem + "_clasificado.bc3")
+            total = self._count_descompuestos_in_bc3(cleaned_bc3)
+            self._append_async(f"Detectados {total} descompuestos a procesar.")
+
+            processed = 0
+
+            def progress(ev: Any):
+                nonlocal processed
+                processed += 1
+                line = self._format_progress_event(ev, processed, total if total else processed)
+                self._append_async(line)
+
+            self._append_async(f"Asignando productos → {out_phase2.name}")
+
+            # Intentamos pasar callback con varios nombres habituales
+            limits = self.model_limits
+            used = False
+            for pname in ("progress_cb", "on_progress", "progress_callback", "callback", "logger"):
+                try:
+                    kwargs = {
+                        "input_bc3": cleaned_bc3,
+                        "catalog_path": self.catalog_path,
+                        "output_bc3": out_phase2,
+                        "model_name": self.model_name,
+                        "rpm_limit": limits["RPM"],
+                        "tpm_limit": limits["TPM"],
+                        "rpd_limit": limits["RPD"],
+                        pname: progress,
+                    }
+                    run_phase2(**kwargs)  # type: ignore[misc]
+                    used = True
+                    break
+                except TypeError:
+                    continue
+
+            if not used:
+                # Fallback sin callback (API antigua)
+                try:
+                    run_phase2(
+                        input_bc3=cleaned_bc3,
+                        catalog_path=self.catalog_path,
+                        output_bc3=out_phase2,
+                        model_name=self.model_name,
+                        rpm_limit=limits["RPM"],
+                        tpm_limit=limits["TPM"],
+                        rpd_limit=limits["RPD"],
+                    )
+                except TypeError:
+                    run_phase2(cleaned_bc3, self.catalog_path, out_phase2)  # type: ignore[misc]
+
+            self._append_async(f"Guardado: {out_phase2}")
+
+        except Exception as e:
+            ok = False
+            self._append_async(f"ERROR: {e}", tag="err")
+        finally:
+            self._enable_actions()
+            self._append_banner_async("TERMINADO" if ok else "FAIL", ok=ok)
+
+    # ---------------------------- validaciones ------------------------------ #
+    def _ensure_input(self) -> bool:
+        p = self.entry_input.get().strip()
+        if not p:
+            messagebox.showerror("Entrada", "Selecciona primero un fichero BC3.")
+            return False
+        self.input_path = Path(p)
+        if not self.input_path.exists():
+            messagebox.showerror("Entrada", f"No existe: {self.input_path}")
+            return False
+        if self.input_path.suffix.lower() != ".bc3":
+            messagebox.showerror("Entrada", "El archivo debe ser *.bc3")
+            return False
+        return True
+
+    def _ensure_catalog(self) -> bool:
+        p = self.entry_catalog.get().strip()
+        if not p:
+            messagebox.showerror("Catálogo", "No se ha encontrado el catálogo IA. Selecciónalo o colócalo en /resources.")
+            return False
+        self.catalog_path = Path(p)
+        if not self.catalog_path.exists():
+            messagebox.showerror("Catálogo", f"No existe: {self.catalog_path}")
+            return False
+        if self.catalog_path.suffix.lower() not in {".xlsx", ".xls", ".csv"}:
+            messagebox.showwarning("Catálogo", "Formato no estándar. Se esperan .xlsx/.xls/.csv")
+        return True
+
+    def _cleaned_bc3_path(self) -> Path:
+        src = self.input_path
+        return src.with_name(f"{src.stem}_limpio.bc3")
+
+    def _open_output_folder(self) -> None:
+        target = self.last_output_dir or (self.input_path.parent if self.input_path else Path.cwd())
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(target))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                os.system(f'open "{target}"')
+            else:
+                os.system(f'xdg-open "{target}"')
+        except Exception as e:
+            messagebox.showerror("Abrir carpeta", f"No se pudo abrir la carpeta:\n{target}\n\n{e}")
+
+
+# --------------------------------------------------------------------------- #
+#  Entradas públicas                                                          #
+# --------------------------------------------------------------------------- #
+def run() -> None:
+    app = App()
+    app.mainloop()
 
 
 def run_gui() -> None:
-    root = Tk()
-    app = BC3GUI(root)
-    root.mainloop()
+    """Alias para compatibilidad con main_gui.py."""
+    run()
+
+
+if __name__ == "__main__":
+    run()
