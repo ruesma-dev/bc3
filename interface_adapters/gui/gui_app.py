@@ -45,6 +45,7 @@ DEV_CATALOG_PATHS = [
 
 # Modelos Gemini (free tier) y límites orientativos
 MODEL_PRESETS = {
+    "gemini-3-pro-preview":        {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
     "gemini-2.5-pro":        {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
     "gemini-2.5-flash":      {"RPM": 10, "TPM": 250_000,  "RPD": 250},
     "gemini-2.5-flash-lite": {"RPM": 15, "TPM": 250_000,  "RPD": 1000},

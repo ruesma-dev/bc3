@@ -22,6 +22,80 @@ from infrastructure.products.catalog_loader import load_catalog
 MAX_CODE_LEN = 20
 NUM_RE = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
+_PIPE_TAIL_RE = re.compile(r"\|+\s*$")
+
+def _final_trim_trailing_pipes(file_path: Path) -> None:
+    """
+    Limpia el fichero resultante colapsando '|||' finales en un único '|'
+    SOLO al final de cada línea. No toca los '|' internos.
+
+    Reglas:
+      - Para líneas que empiezan por '~' (registros BC3), si terminan con
+        uno o más '|' (posibles espacios después), se colapsa a un único '|'.
+      - No añade '|' si no lo había.
+      - Mantiene saltos de línea.
+    """
+    tmp = file_path.with_suffix(file_path.suffix + ".tmp_clean")
+    pat = re.compile(r"\|+\s*$")
+
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+        for raw in fin:
+            if raw.startswith("~"):
+                s = raw.rstrip("\n")
+                s = pat.sub("|", s)  # '||||  ' -> '|'
+                fout.write(s + "\n")
+            else:
+                # líneas no BC3: solo asegurar salto de línea
+                if not raw.endswith("\n"):
+                    raw = raw + "\n"
+                fout.write(raw)
+
+    # Reemplaza el original por el limpio
+    tmp.replace(file_path)
+def _fix_d_trailing_backslashes(file_path: Path) -> None:
+    """
+    En líneas ~D| elimina TODAS las barras invertidas finales inmediatamente
+    antes del '|' de cierre. No toca las barras internas ni otras líneas.
+
+    Ej.:  '...\\|' -> '|'
+    """
+    tmp = file_path.with_suffix(file_path.suffix + ".tmp_dfix")
+    pat = re.compile(r"\\+\|\s*$")
+
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+        for raw in fin:
+            if raw.startswith("~D|"):
+                s = raw.rstrip("\n")
+                s = pat.sub("|", s)
+                fout.write(s + "\n")
+            else:
+                if not raw.endswith("\n"):
+                    raw = raw + "\n"
+                fout.write(raw)
+
+    tmp.replace(file_path)
+
+def _cleanup_trailing_pipes_file(path: Path) -> None:
+    """
+    Reescribe el archivo asegurando que las líneas BC3 terminen con
+    una única tubería '|' (sin acumular '|||' al final).
+    No toca el contenido interno ni las barras invertidas de ~D.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+        for line in fin:
+            # Mantener exactamente una tubería final
+            # (respetando cualquier barra invertida previa)
+            if line.rstrip("\n").endswith("|"):
+                clean = _PIPE_TAIL_RE.sub("|", line.rstrip("\n")) + "\n"
+                fout.write(clean)
+            else:
+                fout.write(line)
+    path.unlink()
+    tmp.rename(path)
 
 @dataclass
 class Concept:
@@ -947,7 +1021,14 @@ def run_phase2(
 
     # ---- reescritura y CSV --------------------------------------------------
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
+    _cleanup_trailing_pipes_file(bc3_out)
     map_csv = bc3_out.with_name(bc3_out.stem + "_map.csv")
     _write_mapping_csv(rows, map_csv)
+
+    try:
+        _final_trim_trailing_pipes(bc3_out)
+    except Exception:
+        # si algo va mal, no bloqueamos el flujo principal
+        pass
 
     return bc3_out

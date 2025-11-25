@@ -40,7 +40,7 @@ class RateLimiter:
 
 def _configure() -> tuple[Optional[str], str]:
     api_key = os.getenv("GEMINI_API_KEY")
-    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3-pro-preview")
     if genai and api_key:
         genai.configure(api_key=api_key)
     return api_key, model_name

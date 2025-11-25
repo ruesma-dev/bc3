@@ -128,6 +128,38 @@ def _compute_force_material(tipo_map: dict[str, str],
     return force_mat
 
 
+# ---------------------- limpieza de basura RTF en ~T ------------------------ #
+_RTF_GARBAGE_PATTERNS = [
+    r"^\s*w\d{2,}_[^\s()|]*",          # p.ej. w12240_paperh15840_...
+    r"\(?_rtf_ansi[^\)|]*\)?",         # (_rtf_ansi... )
+    r"\(?_fonttbl[^\)|]*\)?",          # (_fonttbl... )
+    r"\(?_colortbl[^\)|]*\)?",         # (_colortbl... )
+    r"\(?_sectd[^\)|]*\)?",            # (_sectd... )
+    r"\(?_header_[^\)|]*\)?",          # (_header_... )
+    r"\(?_footer_[^\)|]*\)?",          # (_footer_... )
+    r"\(?_plain_pard[^\)|]*\)?",       # (_plain_pard... )
+]
+_RTF_GARBAGE_RE = re.compile("|".join(_RTF_GARBAGE_PATTERNS), flags=re.IGNORECASE)
+
+
+def _strip_rtf_artifacts(txt: str) -> str:
+    """
+    Elimina artefactos RTF habituales que a veces aparecen pegados en ~T.
+    No toca separadores del formato; eso lo controla el flujo de escritura.
+    """
+    out = txt
+    # elimina repetidamente mientras siga encontrando basura
+    for _ in range(5):
+        new = _RTF_GARBAGE_RE.sub(" ", out)
+        if new == out:
+            break
+        out = new
+    # colapsa espacios/puntos repetidos y limpia bordes
+    out = re.sub(r"[.]{3,}", "..", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # PASADA 2 – reescritura del BC3                                              #
 # --------------------------------------------------------------------------- #
@@ -144,6 +176,7 @@ def convert_to_material(src: Path, dst: Path) -> None:
         la sustituye por la medición ~M del par (padre, hijo), si existe.
       - Limpia descripciones (tildes, no imprimibles) manteniendo ~ | \.
       - Preserva el nº exacto de barras '\' justo antes del '|' en cada ~D.
+      - En ~T, elimina artefactos RTF comunes y sanea texto (sin reemplazar '|' por '.').
     """
     if not src.exists():
         raise FileNotFoundError(src)
@@ -156,7 +189,7 @@ def convert_to_material(src: Path, dst: Path) -> None:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # Sustitución genérica de códigos largos (no ~C ni ~D)
+    # Sustitución genérica de códigos largos (no ~C, ~D, ~T)
     repl_pattern = re.compile(
         r"(" + "|".join(re.escape(k) for k in code_map.keys()) + r")(?=[\\|])"
     ) if code_map else None
@@ -255,6 +288,22 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 rebuilt = "\\".join(new_chunks) + tail_bslashes
                 parent_code_out = code_map.get(parent_code, parent_code)
                 line = f"~D|{parent_code_out}|{rebuilt}|\n"
+
+            # ---------------------------  ~T  --------------------------------
+            elif raw.startswith("~T|"):
+                # ~T|<code>|<texto_largo>|
+                try:
+                    _tag, rest = raw.split("|", 1)
+                    code, txt = (rest.rstrip("\n").split("|", 1) + [""])[:2]
+                    # aplicar truncado de código si estaba largo
+                    code_out = code_map.get(code, code)
+                    # 1) limpieza “RTF” específica
+                    txt = _strip_rtf_artifacts(txt)
+                    # 2) limpieza general (NO sustituimos '|' por '.')
+                    txt_out = clean_text(txt)
+                    line = f"~T|{code_out}|{txt_out}|\n"
+                except Exception:
+                    line = clean_text(raw.rstrip("\n")) + "\n"
 
             # ------------------ resto de líneas ( ~M, etc. ) ------------------
             else:

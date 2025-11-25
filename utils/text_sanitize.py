@@ -5,10 +5,11 @@ Limpieza de texto para ficheros BC3
 Objetivos
 ---------
 1. Eliminar el carácter de sustitución � y cualquier control/no imprimible.
-2. Quitar TODAS las tildes y diéresis (á → a, ñ → n, ü → u, …).
+2. Quitar TODAS las tildes y diéresis (á → a, ñ → n, ü → u, …).
 3. Conservar los separadores propios del formato BC3:
       ~   |   \
 4. Mantener todos los ASCII imprimibles (letras, números, signos de puntuación).
+5. Convertir { } a ( ) para evitar RTF colado en textos largos.
 
 La función `clean_text()` se usa justo antes de escribir cada línea
 en la copia modificada del BC3.
@@ -45,10 +46,17 @@ def clean_text(text: str) -> str:
     • elimina acentos y diéresis
     • elimina caracteres de sustitución (�) y controles
     • conserva ASCII imprimible y los separadores ~ | \
+    • convierte llaves { } a paréntesis ( )
 
     Ejemplo:
         "SEGÚN ©norma\n"  ->  "SEGUN norma"
     """
+    if text is None:
+        return ""
+
+    # Mapeo de llaves a paréntesis (evita restos de RTF)
+    text = (text.replace("{", "(").replace("}", ")"))
+
     text = _strip_accents(text)
 
     cleaned = "".join(
