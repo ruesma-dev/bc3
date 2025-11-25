@@ -53,6 +53,7 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
 
     # Reemplaza el original por el limpio
     tmp.replace(file_path)
+
 def _fix_d_trailing_backslashes(file_path: Path) -> None:
     """
     En líneas ~D| elimina TODAS las barras invertidas finales inmediatamente
@@ -686,7 +687,7 @@ def _build_replacement_map(
 
     batch_mode = (os.getenv("GEMINI_BATCH_MODE", "false").strip().lower() == "true")
     batch_size = max(1, int(os.getenv("GEMINI_BATCH_SIZE", "10") or "10"))
-    min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or 0.0)
+    min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or "0.0")
 
     assigned: Dict[str, int] = {}
     used: set[str] = set()
@@ -1021,11 +1022,18 @@ def run_phase2(
 
     # ---- reescritura y CSV --------------------------------------------------
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
+
+    # Post-procesado final:
+    # 1) En ~D, eliminar '\' finales justo antes del '|' de cierre
+    _fix_d_trailing_backslashes(bc3_out)
+    # 2) Asegurar una única tubería final por línea
     _cleanup_trailing_pipes_file(bc3_out)
+
     map_csv = bc3_out.with_name(bc3_out.stem + "_map.csv")
     _write_mapping_csv(rows, map_csv)
 
     try:
+        # 3) Colapso defensivo adicional de '|||' -> '|'
         _final_trim_trailing_pipes(bc3_out)
     except Exception:
         # si algo va mal, no bloqueamos el flujo principal

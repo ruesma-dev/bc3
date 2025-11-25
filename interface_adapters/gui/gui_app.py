@@ -27,7 +27,7 @@ except Exception:
 # --------------------------------------------------------------------------- #
 #  Configuración visual y presets                                             #
 # --------------------------------------------------------------------------- #
-APP_VERSION = "0.97"
+APP_VERSION = "0.98"
 APP_TITLE = "Limpieza de BC3"
 
 # Nombres de fichero aceptados por defecto para el catálogo IA externo
@@ -52,7 +52,7 @@ MODEL_PRESETS = {
     "gemini-2.0-flash":      {"RPM": 15, "TPM": 1_000_000, "RPD": 200},
     "gemini-2.0-flash-lite": {"RPM": 30, "TPM": 1_000_000, "RPD": 200},
 }
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3-pro-preview"
 
 
 # --------------------------------------------------------------------------- #
