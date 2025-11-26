@@ -98,6 +98,185 @@ def _cleanup_trailing_pipes_file(path: Path) -> None:
     path.unlink()
     tmp.rename(path)
 
+def _ensure_ud_for_concepts(file_path: Path) -> None:
+    """
+    Después de la asignación por IA, asegura unidad 'ud' cuando falte en:
+      - Descompuestos (tipo '3') y
+      - Partidas (tipo '0')
+    SIEMPRE que el código NO contenga '#'. Los capítulos (con '#') se ignoran.
+    """
+    tmp = file_path.with_suffix(file_path.suffix + ".tmp_units")
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+
+        for raw in fin:
+            if not raw.startswith("~C|"):
+                fout.write(raw)
+                continue
+
+            head, rest = raw.split("|", 1)  # "~C", resto
+            parts = rest.rstrip("\n")
+            fields = parts.split("|")
+            while len(fields) < 6:
+                fields.append("")  # code, unidad, desc, price, date, tipo
+
+            code = fields[0]
+            unidad = fields[1]
+            tipo = fields[5]
+
+            # Afecta a tipo 0 (partidas) y 3 (descompuestos), sin '#', y unidad vacía
+            if tipo.strip() in {"0", "3"} and "#" not in code and (unidad.strip() == ""):
+                fields[1] = "ud"
+
+            line = f"{head}|{'|'.join(fields)}|\n"
+            fout.write(line)
+
+    tmp.replace(file_path)
+
+def _normalize_unit_key(u: str) -> str:
+    """
+    Normaliza la unidad para buscar en el diccionario:
+      - mayúsculas
+      - quita espacios y puntos
+      - sustituye superíndices ²/³ por 2/3
+      - normaliza variantes obvias (M^2 -> M2, M^3 -> M3, M· -> M) en la clave
+    """
+    if not u:
+        return ""
+    s = u.upper().replace(" ", "").replace(".", "")
+    s = s.replace("²", "2").replace("³", "3")
+    s = s.replace("^2", "2").replace("^3", "3")
+    s = s.replace("·", "")  # la clave de lookup no distingue el punto medio
+    return s
+
+
+# Mapa de destino CANÓNICO -> variantes esperables
+# (añade aquí las que quieras; las desconocidas se dejan tal cual)
+_UNIT_VARIANTS: dict[str, set[str]] = {
+    "%": {"%"},
+    "CM": {"CM", "CENTIMETRO", "CENTÍMETRO"},
+    "H": {"H", "HORA", "H."},
+    "HR": {"HR"},  # lo dejamos distinto de H si te interesa separarlo
+    "KG": {"KG", "K.G", "KGS", "KG.", "KILOGRAMO", "KILOS"},
+    "L": {"L", "L.", "LITRO", "LITROS"},
+    "M": {"M", "M.", "METRO", "METROS", "M·"},  # metro “a secas”
+    "ML": {
+        "ML", "M.L", "M L", "M-L", "METROLINEAL", "M LINEAL", "METROS LINEALES",
+        "ML.", "M. L."
+    },
+    "MI": {"MI", "M.I", "M I", "M. I."},  # si usas “metro interior” u otro significado
+    "M2": {
+        "M2", "M2.", "M.2", "M 2", "M^2", "M²", "METROCUADRADO", "METROS CUADRADOS",
+        "M.CUADRADO", "M. CUADRADO"
+    },
+    "M3": {
+        "M3", "M3.", "M.3", "M 3", "M^3", "M³", "METROCUBICO", "METROS CUBICOS",
+        "M.CUBICO", "M. CUBICO"
+    },
+    "MES": {"MES", "MESES"},
+    "PA": {"PA", "PARTIDA ALZADA", "P.A", "P. A."},
+    "PP": {"PP", "P.P", "PARTEPROPORCIONAL", "PARTE PROPORCIONAL"},
+    "T": {"T", "TN", "TON", "TONELADA", "TONELADAS"},
+    "UD": {"UD", "UD.", "U", "U.", "UNIDAD", "UNIDADES", "UNID", "UNID."},
+    "VIV": {"VIV", "VIVIENDA", "VIVIENDAS"},
+    "PLANTAS": {"PLANTAS", "PLANTA", "PLANT", "PLANT."},
+    # Códigos “raros” que quieres respetar tal cual si aparecen:
+    "LEGRAND": {"LEGRAND"},
+}
+
+
+# Prepara índice inverso: clave normalizada -> canon
+_UNIT_LOOKUP: dict[str, str] = {}
+for canon, vars_ in _UNIT_VARIANTS.items():
+    for v in vars_:
+        _UNIT_LOOKUP[_normalize_unit_key(v)] = canon
+# también mapeamos el propio canon a sí mismo
+for canon in _UNIT_VARIANTS.keys():
+    _UNIT_LOOKUP[_normalize_unit_key(canon)] = canon
+
+
+def _unify_units_in_file(file_path: Path) -> None:
+    """
+    Reescribe las líneas ~C unificando la unidad:
+      - Si la unidad existe, intenta mapearla a un CANON (p.ej. M2).
+      - Solo actúa en partidas (tipo '0') y descompuestos (tipo '3').
+      - No toca capítulos (código con '#').
+      - Si la unidad está vacía, no hace nada aquí (eso ya lo cubre _ensure_ud_for_concepts).
+    """
+    tmp = file_path.with_suffix(file_path.suffix + ".tmp_units_unify")
+
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+
+        for raw in fin:
+            if not raw.startswith("~C|"):
+                fout.write(raw)
+                continue
+
+            head, rest = raw.split("|", 1)  # "~C", resto
+            parts = rest.rstrip("\n")
+            fields = parts.split("|")
+            while len(fields) < 6:
+                fields.append("")
+
+            code = fields[0]
+            unidad = fields[1]
+            tipo = fields[5]
+
+            # Solo partidas (0) y descompuestos (3) sin '#'
+            if tipo.strip() in {"0", "3"} and "#" not in code and unidad.strip():
+                key = _normalize_unit_key(unidad)
+                canon = _UNIT_LOOKUP.get(key)
+                if canon:
+                    fields[1] = canon  # unificamos
+
+            line = f"{head}|{'|'.join(fields)}|\n"
+            fout.write(line)
+
+    tmp.replace(file_path)
+
+
+def _ensure_ud_for_materials(file_path: Path) -> None:
+    """
+    Después de la asignación por IA:
+    - Si una línea ~C| corresponde a un descompuesto (tipo == '3'),
+      - el código NO contiene '#'
+      - y la unidad está vacía ('' tras strip),
+      => establecer unidad = 'ud'.
+
+    Respeta el resto de campos y deja todo lo demás intacto.
+    """
+    tmp = file_path.with_suffix(file_path.suffix + ".tmp_units")
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
+         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+
+        for raw in fin:
+            if not raw.startswith("~C|"):
+                fout.write(raw)
+                continue
+
+            head, rest = raw.split("|", 1)  # "~C", resto
+            parts = rest.rstrip("\n")
+            # El registro ~C termina siempre con '|', así que al hacer split
+            # el último elemento suele ser '' (campo vacío final). Lo mantenemos.
+            fields = parts.split("|")
+            while len(fields) < 6:
+                fields.append("")  # code, unidad, desc, price, date, tipo
+
+            code = fields[0]
+            unidad = fields[1]
+            tipo = fields[5]
+
+            # Solo descompuestos reales tipo 3 sin '#', y sin unidad informada
+            if tipo.strip() == "3" and "#" not in code and (unidad.strip() == ""):
+                fields[1] = "ud"
+
+            # Reconstruir manteniendo el mismo estilo (una tubería final)
+            line = f"{head}|{'|'.join(fields)}|\n"
+            fout.write(line)
+
+    tmp.replace(file_path)
+
 @dataclass
 class Concept:
     code: str
@@ -687,7 +866,7 @@ def _build_replacement_map(
 
     batch_mode = (os.getenv("GEMINI_BATCH_MODE", "false").strip().lower() == "true")
     batch_size = max(1, int(os.getenv("GEMINI_BATCH_SIZE", "10") or "10"))
-    min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or "0.0")
+    min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or 0.0)
 
     assigned: Dict[str, int] = {}
     used: set[str] = set()
@@ -1020,20 +1199,26 @@ def run_phase2(
         for i, (oldc, newc, conf, method) in enumerate(rows, 1):
             progress_cb(f"{i}/{total} | {oldc} → {newc} ({conf:.2f}, {method})")
 
-    # ---- reescritura y CSV --------------------------------------------------
+    # ---- reescritura y post-procesado --------------------------------------
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
-
-    # Post-procesado final:
-    # 1) En ~D, eliminar '\' finales justo antes del '|' de cierre
-    _fix_d_trailing_backslashes(bc3_out)
-    # 2) Asegurar una única tubería final por línea
+    # Asegurar unidad 'ud' en descompuestos tipo 3 sin unidad (y sin '#')
+    _ensure_ud_for_materials(bc3_out)
+    _ensure_ud_for_concepts(bc3_out)
+    # Unificación de unidades (M2, M.2, M2. -> M2; U, Ud., UD. -> UD; etc.)
+    _unify_units_in_file(bc3_out)
+    # Limpiar colas de tuberías y backslashes finales en ~D
     _cleanup_trailing_pipes_file(bc3_out)
 
+    try:
+        _fix_d_trailing_backslashes(bc3_out)
+    except Exception:
+        pass
+
+    # ---- CSV con mapping ----------------------------------------------------
     map_csv = bc3_out.with_name(bc3_out.stem + "_map.csv")
     _write_mapping_csv(rows, map_csv)
 
     try:
-        # 3) Colapso defensivo adicional de '|||' -> '|'
         _final_trim_trailing_pipes(bc3_out)
     except Exception:
         # si algo va mal, no bloqueamos el flujo principal

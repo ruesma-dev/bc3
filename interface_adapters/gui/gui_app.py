@@ -27,7 +27,7 @@ except Exception:
 # --------------------------------------------------------------------------- #
 #  Configuración visual y presets                                             #
 # --------------------------------------------------------------------------- #
-APP_VERSION = "0.98"
+APP_VERSION = "0.99"
 APP_TITLE = "Limpieza de BC3"
 
 # Nombres de fichero aceptados por defecto para el catálogo IA externo
