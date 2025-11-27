@@ -31,20 +31,100 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.15g}".replace(",", ".")
 
 
+# -------------------------- Unificación de unidades ------------------------- #
+# Claves del diccionario se forman con el texto ya limpio, en MAYÚSCULAS
+# y sin puntos/espacios/signos (M.2 -> M2, U. -> U, PLANTAS -> PLANT, etc.)
+_UNIT_CANON_MAP: dict[str, str] = {
+    "%": "%",
+
+    # Longitud / superficie / volumen
+    "M": "M",
+    "M2": "M2",
+    "M3": "M3",
+    "ML": "ML",          # metro lineal
+    "MI": "M.I.",        # mantener formato con puntos porque es habitual en BC3
+
+    # Tiempo
+    "H": "H",
+    "HR": "HR",
+
+    # Otras básicas
+    "CM": "CM",
+    "KG": "KG",
+    "L": "L",
+    "MES": "MES",
+    "MU": "MU",
+    "PA": "PA",          # partida alzada
+    "PP": "PP",          # parte proporcional
+    "T": "T",            # tonelada
+
+    # Unidades sueltas
+    "U": "UD",
+    "UD": "UD",
+    "UN": "UD",
+    "UNIDAD": "UD",
+    "UNIDADES": "UD",
+
+    # Varios “especiales” del catálogo/BC3 que se deben respetar
+    "PLANT": "PLANT",
+    "PLANTAS": "PLANT",
+    "VIV": "VIV",
+    "LEGRAND": "LEGRAND",
+}
+
+def _unit_unify(u_raw: str) -> str:
+    """
+    Unifica variantes comunes de unidades a una forma canónica.
+    - Limpia con clean_text
+    - Normaliza a mayúsculas
+    - Elimina puntos, espacios, separadores '·', guiones y signos similares
+    - Aplica el mapa _UNIT_CANON_MAP si hay match; si no, devuelve el texto limpio.
+    """
+    if not u_raw:
+        return ""
+
+    u = clean_text(u_raw).strip()
+    if not u:
+        return ""
+
+    # respetar exactamente '%' si viene así
+    if u == "%":
+        return "%"
+
+    # clave sin decoraciones
+    key = (
+        u.upper()
+         .replace("·", "")
+         .replace(".", "")
+         .replace(" ", "")
+         .replace("-", "")
+         .replace("_", "")
+         .replace("º", "")
+    )
+
+    # Algunas formas matemáticas que aparecen a veces: m^2, m^3
+    key = key.replace("^2", "2").replace("^3", "3")
+
+    # Mapeo canónico
+    canon = _UNIT_CANON_MAP.get(key)
+    if canon:
+        return canon
+
+    # Si no hay mapeo, devolvemos la versión limpia original (sin tocar el caso)
+    return u
+
+
 def _unit_normalized(unidad_raw: str) -> str:
     """
-    Limpia y valida la unidad. Si queda vacía o es “rara”, devuelve DEFAULT_UNIT.
-    Regla de validez:
-      - tras limpiar con clean_text, si hay al menos un alfanumérico -> OK
-      - o si la unidad es exactamente '%' -> OK
-      - en otro caso -> DEFAULT_UNIT
+    Limpia, valida y **unifica** la unidad.
+    - Si tras limpiar queda vacía o no hay ningún alfanumérico, devuelve DEFAULT_UNIT.
+    - '%' se respeta.
+    - Se aplican reglas de unificación (_unit_unify).
     """
-    u = clean_text(unidad_raw or "").strip()
+    u = _unit_unify(unidad_raw or "")
     if not u:
         return DEFAULT_UNIT
-    if any(ch.isalnum() for ch in u):
-        return u
-    if u == "%":  # p.ej. descuentos que usan porcentaje como unidad
+    if any(ch.isalnum() for ch in u) or u == "%":
         return u
     return DEFAULT_UNIT
 
@@ -148,13 +228,11 @@ def _strip_rtf_artifacts(txt: str) -> str:
     No toca separadores del formato; eso lo controla el flujo de escritura.
     """
     out = txt
-    # elimina repetidamente mientras siga encontrando basura
     for _ in range(5):
         new = _RTF_GARBAGE_RE.sub(" ", out)
         if new == out:
             break
         out = new
-    # colapsa espacios/puntos repetidos y limpia bordes
     out = re.sub(r"[.]{3,}", "..", out)
     out = re.sub(r"\s{2,}", " ", out).strip()
     return out
@@ -169,14 +247,12 @@ def convert_to_material(src: Path, dst: Path) -> None:
       - Trunca códigos largos (≤20).
       - Fuerza T=3 en descompuestos originales (1/2/3) y en toda la sub-rama
         bajo partidas reales (T=0 sin '#').
-      - **Asegura unidad válida en TODOS los descompuestos (originales y convertidos)**:
-        si tras limpiar no es válida → 'ud'.
+      - **Asegura y UNIFICA la unidad en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS**.
       - Si una partida T=0 pasa a T=3, conserva su precio original.
-      - En ~D, si la cantidad del hijo (que era T=0 y pasa a material) viene 0,
-        la sustituye por la medición ~M del par (padre, hijo), si existe.
-      - Limpia descripciones (tildes, no imprimibles) manteniendo ~ | \.
-      - Preserva el nº exacto de barras '\' justo antes del '|' en cada ~D.
-      - En ~T, elimina artefactos RTF comunes y sanea texto (sin reemplazar '|' por '.').
+      - En ~D, si qty del hijo (ex T=0 → material) es 0, usa medición ~M.
+      - Limpia descripciones manteniendo separadores ~ | \.
+      - Preserva el nº exacto de '\' justo antes del '|' en cada ~D.
+      - En ~T, limpia artefactos RTF (sin reemplazar '|').
     """
     if not src.exists():
         raise FileNotFoundError(src)
@@ -232,13 +308,10 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     parts[5] = "3"
                     tipo = "3"
 
-                # === NORMALIZACIÓN DE UNIDAD PARA TODOS LOS DESCOMPUESTOS ===
-                # Consideramos descompuesto si:
-                #   - tipo efectivo es 3, o
-                #   - aparece como hijo en algún ~D, o
-                #   - está en la rama forzada a material
+                # === UNIDAD para PARTIDAS y DESCOMPUESTOS (primera pasada) ===
                 is_desc = (tipo == "3") or (code in all_children) or (code in force_mat)
-                if is_desc:
+                is_partida = (tipo == "0") and ("#" not in code)
+                if is_desc or is_partida:
                     parts[1] = _unit_normalized(unidad)
 
                 # Limpiamos SOLO la descripción (no tocamos precio/fecha/tipo aquí)

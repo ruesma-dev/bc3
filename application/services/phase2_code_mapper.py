@@ -1202,10 +1202,10 @@ def run_phase2(
     # ---- reescritura y post-procesado --------------------------------------
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
     # Asegurar unidad 'ud' en descompuestos tipo 3 sin unidad (y sin '#')
-    _ensure_ud_for_materials(bc3_out)
-    _ensure_ud_for_concepts(bc3_out)
+    # _ensure_ud_for_materials(bc3_out)
+    # _ensure_ud_for_concepts(bc3_out)
     # Unificación de unidades (M2, M.2, M2. -> M2; U, Ud., UD. -> UD; etc.)
-    _unify_units_in_file(bc3_out)
+    # _unify_units_in_file(bc3_out)
     # Limpiar colas de tuberías y backslashes finales en ~D
     _cleanup_trailing_pipes_file(bc3_out)
 
@@ -1213,15 +1213,16 @@ def run_phase2(
         _fix_d_trailing_backslashes(bc3_out)
     except Exception:
         pass
-
+    #
     # ---- CSV con mapping ----------------------------------------------------
     map_csv = bc3_out.with_name(bc3_out.stem + "_map.csv")
     _write_mapping_csv(rows, map_csv)
-
+    #
     try:
         _final_trim_trailing_pipes(bc3_out)
     except Exception:
-        # si algo va mal, no bloqueamos el flujo principal
+    #     si algo va mal, no bloqueamos el flujo principal
         pass
 
     return bc3_out
+#
