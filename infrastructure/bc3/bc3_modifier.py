@@ -7,7 +7,7 @@ from utils.text_sanitize import clean_text
 
 # --- constantes ---
 MAX_CODE_LEN = 20
-DEFAULT_UNIT = "ud"  # unidad por defecto si falta o es inválida
+DEFAULT_UNIT = "UD"  # unidad por defecto si falta o es inválida
 
 
 def _short(code: str) -> str:
@@ -32,53 +32,74 @@ def _fmt_num(value: float | None) -> str:
 
 
 # -------------------------- Unificación de unidades ------------------------- #
-# Claves del diccionario se forman con el texto ya limpio, en MAYÚSCULAS
-# y sin puntos/espacios/signos (M.2 -> M2, U. -> U, PLANTAS -> PLANT, etc.)
-_UNIT_CANON_MAP: dict[str, str] = {
-    "%": "%",
+# Objetivo: solo 13 unidades canónicas (siempre en MAYÚSCULAS):
+# %, CM, H, KG, T, L, M, M2, M3, PA, PLANTA, UD, VIV
+_CANON_UNITS = {
+    "%", "CM", "H", "KG", "T", "L", "M", "M2", "M3", "PA", "PLANTA", "UD", "VIV"
+}
 
-    # Longitud / superficie / volumen
-    "M": "M",
-    "M2": "M2",
-    "M3": "M3",
-    "ML": "ML",          # metro lineal
-    "MI": "M.I.",        # mantener formato con puntos porque es habitual en BC3
+# Sinónimos/variantes -> canónica (ya sin puntos/espacios y en MAYÚSCULAS)
+# Nota: abajo, en _unit_unify, se normaliza la clave eliminando '.', ' ', '-', '_', '·', 'º'
+_UNIT_SYNONYM_MAP: dict[str, str] = {
+    # Porcentaje
+    "%": "%", "PORCENTAJE": "%",
 
-    # Tiempo
-    "H": "H",
-    "HR": "HR",
+    # Centímetro
+    "CM": "CM", "CMS": "CM", "CENTIMETRO": "CM", "CENTIMETROS": "CM",
+    "CENTIMETER": "CM", "CENTIMETERS": "CM",
 
-    # Otras básicas
-    "CM": "CM",
-    "KG": "KG",
-    "L": "L",
-    "MES": "MES",
-    "MU": "MU",
-    "PA": "PA",          # partida alzada
-    "PP": "PP",          # parte proporcional
-    "T": "T",            # tonelada
+    # Hora
+    "H": "H", "HR": "H", "HRS": "H", "HS": "H",
+    "HORA": "H", "HORAS": "H",
 
-    # Unidades sueltas
-    "U": "UD",
-    "UD": "UD",
-    "UN": "UD",
-    "UNIDAD": "UD",
-    "UNIDADES": "UD",
+    # Kilogramo
+    "KG": "KG", "KGS": "KG", "KILO": "KG", "KILOS": "KG",
+    "KILOGRAMO": "KG", "KILOGRAMOS": "KG",
 
-    # Varios “especiales” del catálogo/BC3 que se deben respetar
-    "PLANT": "PLANT",
-    "PLANTAS": "PLANT",
-    "VIV": "VIV",
-    "LEGRAND": "LEGRAND",
+    # Tonelada
+    "T": "T", "TN": "T", "TON": "T", "TM": "T",
+    "TONELADA": "T", "TONELADAS": "T",
+
+    # Litro
+    "L": "L", "LT": "L", "LTS": "L", "LITRO": "L", "LITROS": "L",
+
+    # Metro (longitud)
+    "M": "M", "METRO": "M", "METROS": "M",
+    "ML": "M", "MLINEAL": "M", "METROLINEAL": "M", "METROSLINEALES": "M",
+
+    # Metro cuadrado
+    "M2": "M2", "METROCUADRADO": "M2", "METROSCUADRADOS": "M2",
+    "METROSCUADRADO": "M2", "M2CUADRADOS": "M2",
+
+    # Metro cúbico
+    "M3": "M3", "METROCUBICO": "M3", "METROSCUBICOS": "M3",
+    "METROSCUBICO": "M3", "M3CUBICOS": "M3",
+
+    # Partida alzada
+    "PA": "PA", "P.A": "PA", "PAA": "PA",
+    "PARTIDAALZADA": "PA", "PARTIDASALZADA": "PA",
+
+    # Planta
+    "PLANTA": "PLANTA", "PLANT": "PLANTA", "PLANTAS": "PLANTA",
+
+    # Unidad
+    "UD": "UD", "U": "UD", "UN": "UD", "UNID": "UD", "UNIDS": "UD",
+    "UNIDAD": "UD", "UNIDADES": "UD", "PIEZA": "UD", "PIEZAS": "UD",
+    "PZA": "UD", "PZAS": "UD",
+
+    # Vivienda
+    "VIV": "VIV", "VIVIENDA": "VIV", "VIVIENDAS": "VIV",
 }
 
 def _unit_unify(u_raw: str) -> str:
     """
-    Unifica variantes comunes de unidades a una forma canónica.
+    Unifica variantes comunes de unidades a una de las 13 formas canónicas.
     - Limpia con clean_text
     - Normaliza a mayúsculas
-    - Elimina puntos, espacios, separadores '·', guiones y signos similares
-    - Aplica el mapa _UNIT_CANON_MAP si hay match; si no, devuelve el texto limpio.
+    - Elimina puntos, espacios y signos '·', '-', '_' y 'º'
+    - Convierte '²'->'2', '³'->'3' y 'M^2'/'M^3' -> 'M2'/'M3'
+    - Usa _UNIT_SYNONYM_MAP; si no hay match y hay texto alfanumérico, devuelve el limpio;
+      al final _unit_normalized decidirá si cae a DEFAULT_UNIT.
     """
     if not u_raw:
         return ""
@@ -87,11 +108,11 @@ def _unit_unify(u_raw: str) -> str:
     if not u:
         return ""
 
-    # respetar exactamente '%' si viene así
+    # Atajos
     if u == "%":
         return "%"
 
-    # clave sin decoraciones
+    # Normalización fuerte para clave
     key = (
         u.upper()
          .replace("·", "")
@@ -101,31 +122,52 @@ def _unit_unify(u_raw: str) -> str:
          .replace("_", "")
          .replace("º", "")
     )
-
-    # Algunas formas matemáticas que aparecen a veces: m^2, m^3
+    # Potencias y superíndices
     key = key.replace("^2", "2").replace("^3", "3")
+    key = key.replace("²", "2").replace("³", "3")
 
-    # Mapeo canónico
-    canon = _UNIT_CANON_MAP.get(key)
+    # Normalizaciones específicas M.2 / M^2 / M² -> M2  (y análogo para M3)
+    if key in {"M2", "M02"}:
+        key = "M2"
+    if key in {"M3", "M03"}:
+        key = "M3"
+
+    # Sinónimos → canónica
+    canon = _UNIT_SYNONYM_MAP.get(key)
     if canon:
         return canon
 
-    # Si no hay mapeo, devolvemos la versión limpia original (sin tocar el caso)
-    return u
+    # Si no mapeamos pero parece una de las formas M2/M3 por patrón, fállelas a canónica
+    if re.fullmatch(r"M2", key):
+        return "M2"
+    if re.fullmatch(r"M3", key):
+        return "M3"
+    if re.fullmatch(r"M", key):
+        return "M"
+
+    # Si no hay mapeo, devolver el texto limpio en MAYÚSCULAS (lo validamos luego)
+    return u.upper()
 
 
 def _unit_normalized(unidad_raw: str) -> str:
     """
-    Limpia, valida y **unifica** la unidad.
-    - Si tras limpiar queda vacía o no hay ningún alfanumérico, devuelve DEFAULT_UNIT.
+    Limpia, **unifica** y valida la unidad.
+    - Siempre devuelve MAYÚSCULAS.
+    - Si tras unificar no pertenece al conjunto canónico pero tiene alfanumérico,
+      se usa DEFAULT_UNIT ('UD').
     - '%' se respeta.
-    - Se aplican reglas de unificación (_unit_unify).
     """
     u = _unit_unify(unidad_raw or "")
     if not u:
         return DEFAULT_UNIT
-    if any(ch.isalnum() for ch in u) or u == "%":
-        return u
+    if u == "%":
+        return "%"
+    u = u.upper()
+    if any(ch.isalnum() for ch in u):
+        if u in _CANON_UNITS:
+            return u
+        # cae a la unidad por defecto si no está en el universo canónico
+        return DEFAULT_UNIT
     return DEFAULT_UNIT
 
 
@@ -247,8 +289,9 @@ def convert_to_material(src: Path, dst: Path) -> None:
       - Trunca códigos largos (≤20).
       - Fuerza T=3 en descompuestos originales (1/2/3) y en toda la sub-rama
         bajo partidas reales (T=0 sin '#').
-      - **Asegura y UNIFICA la unidad en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS**.
-      - Si una partida T=0 pasa a T=3, conserva su precio original.
+        Si una partida T=0 pasa a T=3, conserva su precio original.
+      - **Asegura y UNIFICA la unidad en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS**,
+        usando el set canónico: %, CM, H, KG, T, L, M, M2, M3, PA, PLANTA, UD, VIV.
       - En ~D, si qty del hijo (ex T=0 → material) es 0, usa medición ~M.
       - Limpia descripciones manteniendo separadores ~ | \.
       - Preserva el nº exacto de '\' justo antes del '|' en cada ~D.
