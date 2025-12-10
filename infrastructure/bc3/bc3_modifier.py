@@ -65,6 +65,54 @@ def _shorten_code_unique(code: str,
             return candidate
         i += 1
 
+def _format_d_triplets(parent_code_out: str, triplets: list[str]) -> str:
+    """
+    Construye una línea ~D en formato canónico BC3:
+
+        ~D|PADRE|c1\k1\q1\c2\k2\q2\...\|
+
+    Es decir:
+      - un separador '\' entre cada campo,
+      - y exactamente un '\' antes del '|' final.
+    """
+    if triplets:
+        body = "\\".join(triplets) + "\\"
+    else:
+        body = ""
+    return f"~D|{parent_code_out}|{body}|\n"
+
+def _ensure_d_trailing_backslash(line: str) -> str:
+    """
+    Si la línea es ~D, garantiza que acabe en '\\|':
+      - si no hay barra antes del último '|', la añade
+      - si hay varias barras, las reduce a una
+    No toca líneas que no sean ~D ni las que no terminen en '|'.
+    """
+    if not line.startswith("~D|"):
+        return line
+
+    raw = line.rstrip("\n")
+    if not raw.endswith("|"):
+        print("[BC3 DEBUG] ~D sin '|' final, no se toca:", raw)
+        return line
+
+    before = raw
+    # Quitamos el '|' final, normalizamos las '\' finales y volvemos a añadir '|'
+    raw_no_tail = raw[:-1]
+    raw_no_tail = raw_no_tail.rstrip("\\") + "\\"
+    after = raw_no_tail + "|"
+
+    if before != after:
+        print(
+            "[BC3 DEBUG] Fix ~D '\\\\' final:\n"
+            "   IN :", before, "\n"
+            "   OUT:", after
+        )
+
+    return after + "\n"
+
+
+
 
 # -------------------------- Unificación de unidades ------------------------- #
 # Objetivo: solo 13 unidades canónicas (siempre en MAYÚSCULAS):
@@ -336,24 +384,26 @@ def _strip_rtf_artifacts(txt: str) -> str:
 # --------------------------------------------------------------------------- #
 def convert_to_material(src: Path, dst: Path) -> None:
     """
-    Normaliza el BC3 y **intercala CD# bajo el supercapítulo '##'**:
-      - Detecta el primer ~C cuyo código termina en '##' (p.ej. '0##') y,
-        cuando procesa su ~D, lo reescribe a 'CD#' y traslada sus hijos
-        originales a un nuevo '~D|CD#|...|'. Inserta '~C|CD#|' si no existía.
-      - Trunca códigos largos (≤20).
-      - Fuerza T=3 en descompuestos originales (1/2/3) y en sub-rama bajo T=0.
-        Si una partida T=0 pasa a T=3, conserva su precio original.
-      - **Asegura y UNIFICA la unidad** en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS.
-      - En ~D, si qty del hijo (ex T=0 → material) es 0, usa medición ~M.
-      - Limpia descripciones manteniendo separadores ~ | \.
-      - Preserva el nº exacto de '\' justo antes del '|' en cada ~D (en las reescrituras normales).
-      - En ~T, limpia artefactos RTF (sin reemplazar '|').
+    Normaliza el BC3 y **intercala CD# bajo el supercapítulo '##'**.
+    (Docstring original, sin cambios funcionales, solo añadidos prints
+    y corrección del orden clean_text → _ensure_d_trailing_backslash
+    en las ~D).
     """
     if not src.exists():
         raise FileNotFoundError(src)
 
+    print("[BC3 DEBUG] convert_to_material() SRC=", src, "DST=", dst)
+
     code_map, tipo_map, children_map, price_map, meas_pair_map = _collect_info(src)
     force_mat = _compute_force_material(tipo_map, children_map)
+
+    print(
+        "[BC3 DEBUG]  tipo_map:", len(tipo_map),
+        "children_map:", len(children_map),
+        "price_map:", len(price_map),
+        "meas_pair_map:", len(meas_pair_map),
+        "force_mat:", len(force_mat)
+    )
 
     # Conjunto de todos los códigos que aparecen como hijo en ~D
     all_children: set[str] = {ch for lst in children_map.values() for ch in lst}
@@ -384,8 +434,7 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 while len(parts) < 6:
                     parts.append("")  # code, unidad, desc, pres, fecha, tipo
 
-                # --- separar código lógico vs código de salida ------------------------
-                orig_code = parts[0]  # tal como viene en el BC3
+                orig_code = parts[0]
                 unidad = parts[1]
                 desc = parts[2]
                 pres = parts[3]
@@ -394,14 +443,15 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 # detectar supercapítulo sobre el código ORIGINAL
                 if super_root is None and orig_code.endswith("##"):
                     super_root = orig_code
+                    print("[BC3 DEBUG]  Detectado super_root:", super_root)
 
                 # aplicar truncado SOLO para el código de salida
                 if orig_code in code_map:
                     code_out = code_map[orig_code]
                 else:
                     code_out = orig_code
-                parts[0] = code_out  # lo que vamos a escribir
-                code = code_out  # alias local para salida
+                parts[0] = code_out
+                code = code_out  # alias local para salida (por si lo necesitas)
 
                 # Descompuestos originales (1/2/3) → material
                 if tipo in {"1", "2", "3"}:
@@ -409,7 +459,6 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     tipo = "3"
 
                 # Rama bajo partidas reales ⇒ material
-                # 🔵 OJO: comprobamos en force_mat con el código ORIGINAL
                 if orig_code in force_mat:
                     orig_tipo = tipo_map.get(orig_code, tipo)
                     if orig_tipo == "0":
@@ -418,7 +467,6 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     tipo = "3"
 
                 # === UNIDAD para PARTIDAS y DESCOMPUESTOS ===
-                # también usamos orig_code para saber si es hijo / partida real
                 is_desc = (tipo == "3") or (orig_code in all_children) or (orig_code in force_mat)
                 is_partida = (tipo == "0") and ("#" not in orig_code)
                 if is_desc or is_partida:
@@ -428,11 +476,14 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 parts[2] = clean_text(desc)
 
                 line = f"{head}|{'|'.join(parts)}|\n"
-                fout.write(clean_text(line))
+                line = clean_text(line)
+                fout.write(line)
                 continue
 
             # ---------------------------  ~D  --------------------------------
             if raw.startswith("~D|"):
+                print("[BC3 DEBUG] Leyendo ~D original:", raw.rstrip("\n"))
+
                 # Analizamos el ~D original para posible intercalación CD#
                 _tag, rest = raw.split("|", 1)
                 parent_code, child_part = rest.split("|", 1)
@@ -468,11 +519,23 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     child_code_out = code_map.get(child_code, child_code)
                     triplets.extend([child_code_out, coef, qty])
 
+                print("[BC3 DEBUG]   parent_code:", parent_code, "triplets:", triplets)
+
                 # ¿Es el ~D del supercapítulo? Intercala CD#
-                if need_cd_parent and (super_root is not None) and (parent_code == super_root) and not super_d_rewritten:
+                if (
+                    need_cd_parent
+                    and (super_root is not None)
+                    and (parent_code == super_root)
+                    and not super_d_rewritten
+                ):
                     # 1) Reescribimos el ~D del supercapítulo para que SOLO cuelgue CD#
-                    #    (sin barras invertidas extra al final)
-                    fout.write(f"~D|{super_root}|CD#\\1\\1\\1|\n")
+                    line_super = f"~D|{super_root}|CD#\\1\\1\\1|\n"
+                    print("[BC3 DEBUG]   ~D super_root antes limpieza:", line_super.rstrip("\n"))
+                    line_super = clean_text(line_super)
+                    # Aseguramos barra final DESPUÉS de limpiar
+                    line_super = _ensure_d_trailing_backslash(line_super)
+                    print("[BC3 DEBUG]   ~D super_root final:", line_super.rstrip("\n"))
+                    fout.write(line_super)
 
                     # 2) Insertamos ~C|CD# si no existía
                     if not cd_concept_written:
@@ -480,8 +543,13 @@ def convert_to_material(src: Path, dst: Path) -> None:
                         cd_concept_written = True
 
                     # 3) Colgamos bajo CD# todos los hijos originales del supercapítulo
-                    rebuilt_children = "\\".join(triplets)  # NO añadimos tail_bslashes: salida limpia
-                    fout.write(f"~D|CD#|{rebuilt_children}|\n")
+                    children_body = "\\".join(triplets)
+                    line_cd = f"~D|CD#|{children_body}|\n"
+                    print("[BC3 DEBUG]   ~D CD# antes limpieza:", line_cd.rstrip("\n"))
+                    line_cd = clean_text(line_cd)
+                    line_cd = _ensure_d_trailing_backslash(line_cd)
+                    print("[BC3 DEBUG]   ~D CD# final:", line_cd.rstrip("\n"))
+                    fout.write(line_cd)
 
                     super_d_rewritten = True
                     continue  # ya hemos escrito lo necesario para este ~D
@@ -490,20 +558,21 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 rebuilt = "\\".join(triplets) + tail_bslashes
                 parent_code_out = code_map.get(parent_code, parent_code)
                 line = f"~D|{parent_code_out}|{rebuilt}|\n"
-                fout.write(clean_text(line))
+                print("[BC3 DEBUG]   ~D normal antes limpieza:", line.rstrip("\n"))
+                line = clean_text(line)
+                # OJO: ahora aseguramos barra final DESPUÉS de clean_text
+                line = _ensure_d_trailing_backslash(line)
+                print("[BC3 DEBUG]   ~D normal final:", line.rstrip("\n"))
+                fout.write(line)
                 continue
 
             # ---------------------------  ~T  --------------------------------
             if raw.startswith("~T|"):
-                # ~T|<code>|<texto_largo>|
                 try:
                     _tag, rest = raw.split("|", 1)
                     code, txt = (rest.rstrip("\n").split("|", 1) + [""])[:2]
-                    # aplicar truncado de código si estaba largo
                     code_out = code_map.get(code, code)
-                    # 1) limpieza “RTF” específica
                     txt = _strip_rtf_artifacts(txt)
-                    # 2) limpieza general (NO sustituimos '|' por '.')
                     txt_out = clean_text(txt)
                     line = f"~T|{code_out}|{txt_out}|\n"
                 except Exception:
@@ -517,19 +586,30 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     lambda m: code_map[m.group(1)], raw.rstrip("\n")
                 ) + "\n"
 
-            # Escritura con limpieza (respeta ~ | \)
             fout.write(clean_text(line))
 
         # Fallback: si detectamos super_root pero no vimos su ~D (caso raro),
-        # insertamos la estructura CD# al final usando children_map de la pasada 1.
         if need_cd_parent and (super_root is not None) and not super_d_rewritten:
             orig_children = children_map.get(super_root, [])
             triplets = []
             for c in orig_children:
                 c_out = code_map.get(c, c)
-                # sin conocer coef/qty originales, colgamos 1\1 (estándar)
                 triplets.extend([c_out, "1", "1"])
-            fout.write(f"~D|{super_root}|CD#\\1\\1\\1|\n")
+
+            line_super = f"~D|{super_root}|CD#\\1\\1\\1|\n"
+            print("[BC3 DEBUG]   [fallback] ~D super_root antes limpieza:", line_super.rstrip("\n"))
+            line_super = clean_text(line_super)
+            line_super = _ensure_d_trailing_backslash(line_super)
+            print("[BC3 DEBUG]   [fallback] ~D super_root final:", line_super.rstrip("\n"))
+            fout.write(line_super)
+
             if not cd_concept_written:
                 fout.write("~C|CD#||COSTE DIRECTO|||0|\n")
-            fout.write(f"~D|CD#|{'\\'.join(triplets)}|\n")
+
+            children_body = "\\".join(triplets)
+            line_cd = f"~D|CD#|{children_body}|\n"
+            print("[BC3 DEBUG]   [fallback] ~D CD# antes limpieza:", line_cd.rstrip("\n"))
+            line_cd = clean_text(line_cd)
+            line_cd = _ensure_d_trailing_backslash(line_cd)
+            print("[BC3 DEBUG]   [fallback] ~D CD# final:", line_cd.rstrip("\n"))
+            fout.write(line_cd)

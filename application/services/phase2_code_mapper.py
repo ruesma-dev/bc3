@@ -61,27 +61,40 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
 
 def _fix_d_trailing_backslashes(file_path: Path) -> None:
     """
-    En líneas ~D| elimina TODAS las barras invertidas finales inmediatamente
-    antes del '|' de cierre. No toca las barras internas ni otras líneas.
-
-    Ej.:  '...\\|' -> '|'
+    Normaliza las líneas ~D para que terminen en '\\|':
+      - si no hay barra antes del último '|', añade UNA '\'
+      - si hay varias barras, las reduce a UNA sola
+    No toca otras líneas.
     """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_dfix")
-    pat = re.compile(r"\\+\|\s*$")
 
     with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
          tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+
         for raw in fin:
             if raw.startswith("~D|"):
                 s = raw.rstrip("\n")
-                s = pat.sub("|", s)
+
+                if s.endswith("|"):
+                    before = s
+                    # Quitamos el '|' final, normalizamos las '\' finales y volvemos a añadir '|'
+                    core = s[:-1]          # todo menos el último '|'
+                    core = core.rstrip("\\") + "\\"   # deja EXACTAMENTE una '\'
+                    s = core + "|"         # añade el pipe final
+
+                    # (opcional) trazas de debug:
+                    # if s != before:
+                    #     print("[PHASE2 DEBUG] Fix ~D '\\' final:\n  IN :", before, "\n  OUT:", s)
+
                 fout.write(s + "\n")
             else:
+                # Resto de líneas: solo aseguramos salto de línea
                 if not raw.endswith("\n"):
                     raw = raw + "\n"
                 fout.write(raw)
 
     tmp.replace(file_path)
+
 
 def _cleanup_trailing_pipes_file(path: Path) -> None:
     """
