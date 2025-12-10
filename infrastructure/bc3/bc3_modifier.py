@@ -30,6 +30,41 @@ def _fmt_num(value: float | None) -> str:
     # Evita notación científica y usa punto
     return f"{value:.15g}".replace(",", ".")
 
+def _shorten_code_unique(code: str,
+                         used: dict[str, str]) -> str:
+    """
+    Devuelve un código BC3 <= MAX_CODE_LEN sin colisiones.
+    `used` es un dict short_code -> original_code.
+    """
+    # Si ya es corto, lo dejamos tal cual
+    if len(code) <= MAX_CODE_LEN:
+        # Si hay duplicado exacto, asumimos que el BC3 original
+        # no tiene códigos repetidos; no tocamos nada.
+        return code
+
+    # 1) Intento naive: primeras MAX_CODE_LEN letras
+    base = code[:MAX_CODE_LEN]
+    if base not in used:
+        used[base] = code
+        return base
+
+    # 2) Intento con último carácter: 19 primeras + último
+    alt = code[:MAX_CODE_LEN - 1] + code[-1]
+    if alt not in used:
+        used[alt] = code
+        return alt
+
+    # 3) Fallback general: sufijos numéricos
+    i = 1
+    while True:
+        suffix = f"#{i}"
+        cutoff = MAX_CODE_LEN - len(suffix)
+        candidate = code[:cutoff] + suffix
+        if candidate not in used:
+            used[candidate] = code
+            return candidate
+        i += 1
+
 
 # -------------------------- Unificación de unidades ------------------------- #
 # Objetivo: solo 13 unidades canónicas (siempre en MAYÚSCULAS):
@@ -177,7 +212,7 @@ def _unit_normalized(unidad_raw: str) -> str:
 def _collect_info(src: Path):
     """
     Devuelve:
-      - code_map: códigos largos -> truncados (≤ MAX_CODE_LEN)
+      - code_map: códigos largos -> truncados ÚNICOS (≤ MAX_CODE_LEN)
       - tipo_map: tipo ORIGINAL por código (0/1/2/3/…)
       - children_map: hijos por padre a partir de ~D
       - price_map: precio ORIGINAL (texto) por código (desde ~C)
@@ -190,6 +225,9 @@ def _collect_info(src: Path):
     price_map: dict[str, str] = {}
     meas_pair_map: dict[tuple[str, str], float] = defaultdict(float)
 
+    # short_code -> original_code (para evitar colisiones al recortar)
+    used_short: dict[str, str] = {}
+
     with src.open("r", encoding="latin-1", errors="ignore") as fh:
         for raw in fh:
             if raw.startswith("~C|"):
@@ -198,10 +236,22 @@ def _collect_info(src: Path):
                 if len(parts) >= 6:
                     code = parts[0]
                     tipo = parts[5]
+
                     tipo_map[code] = tipo
                     price_map[code] = parts[3] if len(parts) > 3 else ""
+
+                    # Construimos code_map solo para códigos LARGOS
                     if len(code) > MAX_CODE_LEN:
-                        code_map[code] = _short(code)
+                        # Evitar recalcular para el mismo código original
+                        if code not in code_map:
+                            short = _shorten_code_unique(code, used_short)
+                            code_map[code] = short
+                    else:
+                        # Registrar también los códigos cortos tal cual,
+                        # para que ningún código largo se recorte a un valor
+                        # ya existente en el BC3 original.
+                        if code not in used_short:
+                            used_short[code] = code
 
             elif raw.startswith("~D|"):
                 _, rest = raw.split("|", 1)
@@ -225,6 +275,7 @@ def _collect_info(src: Path):
                             meas_pair_map[(parent, child)] += qty
 
     return code_map, tipo_map, children_map, price_map, meas_pair_map
+
 
 
 # --------------------------------------------------------------------------- #
@@ -330,45 +381,50 @@ def convert_to_material(src: Path, dst: Path) -> None:
             if raw.startswith("~C|"):
                 head, rest = raw.split("|", 1)
                 parts = rest.rstrip("\n").split("|")
-                # Aseguramos al menos 6 campos: code, unidad, desc, pres, fecha, tipo
                 while len(parts) < 6:
-                    parts.append("")
+                    parts.append("")  # code, unidad, desc, pres, fecha, tipo
 
-                code = parts[0]
+                # --- separar código lógico vs código de salida ------------------------
+                orig_code = parts[0]  # tal como viene en el BC3
                 unidad = parts[1]
                 desc = parts[2]
                 pres = parts[3]
                 tipo = parts[5]
 
-                # Si aún no hemos detectado super_root, el primero que acabe en '##'
-                if super_root is None and code.endswith("##"):
-                    super_root = code
+                # detectar supercapítulo sobre el código ORIGINAL
+                if super_root is None and orig_code.endswith("##"):
+                    super_root = orig_code
 
-                # Truncado de código si venía largo
-                if code in code_map:
-                    parts[0] = code_map[code]
-                    code = parts[0]
+                # aplicar truncado SOLO para el código de salida
+                if orig_code in code_map:
+                    code_out = code_map[orig_code]
+                else:
+                    code_out = orig_code
+                parts[0] = code_out  # lo que vamos a escribir
+                code = code_out  # alias local para salida
 
                 # Descompuestos originales (1/2/3) → material
                 if tipo in {"1", "2", "3"}:
                     parts[5] = "3"
                     tipo = "3"
 
-                # Rama bajo partidas reales ⇒ material (y conservar precio si venía de T=0)
-                if code in force_mat:
-                    orig_tipo = tipo_map.get(parts[0], tipo_map.get(code, tipo))
+                # Rama bajo partidas reales ⇒ material
+                # 🔵 OJO: comprobamos en force_mat con el código ORIGINAL
+                if orig_code in force_mat:
+                    orig_tipo = tipo_map.get(orig_code, tipo)
                     if orig_tipo == "0":
-                        parts[3] = price_map.get(parts[0], price_map.get(code, pres))
+                        parts[3] = price_map.get(orig_code, pres)
                     parts[5] = "3"
                     tipo = "3"
 
                 # === UNIDAD para PARTIDAS y DESCOMPUESTOS ===
-                is_desc = (tipo == "3") or (code in all_children) or (code in force_mat)
-                is_partida = (tipo == "0") and ("#" not in code)
+                # también usamos orig_code para saber si es hijo / partida real
+                is_desc = (tipo == "3") or (orig_code in all_children) or (orig_code in force_mat)
+                is_partida = (tipo == "0") and ("#" not in orig_code)
                 if is_desc or is_partida:
                     parts[1] = _unit_normalized(unidad)
 
-                # Limpiamos SOLO la descripción
+                # limpiar descripción corta
                 parts[2] = clean_text(desc)
 
                 line = f"{head}|{'|'.join(parts)}|\n"

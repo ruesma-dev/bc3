@@ -17,6 +17,11 @@ from infrastructure.ai.gemini_client import (
     choose_best_code_with_llm,
     choose_best_code_batch_with_llm,
 )
+from domain.bc3.records import (
+    ConceptRecord,
+    DescomposicionRecord,
+    MedicionesRecord,
+)
 from infrastructure.products.catalog_loader import load_catalog
 
 MAX_CODE_LEN = 20
@@ -1043,71 +1048,53 @@ def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> No
       - ~D: cambia únicamente el 'child_code' en los tripletes (child\coef\qty)
             y **preserva exactamente** el nº de barras '\' antes de '|'
       - ~M: cambia únicamente el 'child' en el par <parent>\<child>
+
+    Implementación sobre records tipados (ConceptRecord, DescomposicionRecord,
+    MedicionesRecord) pero replicando exactamente la semántica anterior.
     """
     if not repl_map:
+        # Comportamiento previo: si no hay nada que sustituir, copiar tal cual
         dst.write_text(src.read_text("latin-1", errors="ignore"), "latin-1", errors="ignore")
         return
 
     with src.open("r", encoding="latin-1", errors="ignore") as fin, \
          dst.open("w", encoding="latin-1", errors="ignore") as fout:
+
         for raw in fin:
             if raw.startswith("~C|"):
-                head, rest = raw.split("|", 1)
-                parts = rest.rstrip("\n").split("|")
-                while len(parts) < 6:
-                    parts.append("")
-                code = parts[0]
-                if code in repl_map:
-                    parts[0] = repl_map[code]
-                line = f"{head}|{'|'.join(parts)}|\n"
-                fout.write(line)
+                # Antes: split("|"), reemplazar parts[0] si está en repl_map, y reescribir
+                try:
+                    rec = ConceptRecord.parse(raw)
+                    rec.map_code(repl_map)
+                    fout.write(rec.to_line())
+                except Exception:
+                    # Ante cualquier problema, conservamos la línea original
+                    fout.write(raw)
 
             elif raw.startswith("~D|"):
-                # Preservar número exacto de '\' antes del '|'
-                m = re.search(r"(\\+)\|\s*$", raw.rstrip("\n"))
-                tail_bslashes = m.group(1) if m else "\\"
-
-                head, rest = raw.split("|", 1)
-                parent, child_part = rest.split("|", 1)
-
-                body = child_part.rstrip("\n")
-                if body.endswith("|"):
-                    body = body[:-1]
-
-                chunks = body.split("\\")
-                new_chunks: List[str] = []
-                i = 0
-                while i < len(chunks):
-                    child = chunks[i] if i < len(chunks) else ""
-                    coef = chunks[i + 1] if i + 1 < len(chunks) else ""
-                    qty = chunks[i + 2] if i + 2 < len(chunks) else ""
-                    i += 3
-                    if not child:
-                        continue
-                    if child in repl_map:
-                        child = repl_map[child]
-                    new_chunks.extend([child, coef, qty])
-
-                rebuilt = "\\".join(new_chunks) + tail_bslashes
-                line = f"~D|{parent}|{rebuilt}|\n"
-                fout.write(line)
+                # Antes: parsing manual de tripletes child\coef\qty y preservando
+                # las barras finales. Ahora hacemos EXACTAMENTE lo mismo
+                # encapsulado en DescomposicionRecord.
+                try:
+                    rec = DescomposicionRecord.parse(raw)
+                    rec.map_child_codes(repl_map)
+                    fout.write(rec.to_line())
+                except Exception:
+                    # En caso de línea malformada, mantenemos comportamiento robusto
+                    fout.write(raw)
 
             elif raw.startswith("~M|"):
-                # ~M|<parent>\<child>|<meta>|<qty>|...
+                # Antes: solo cambiábamos el 'child' del par <parent>\<child>
+                # si existía, y reescribíamos "~M|pair|tail".
                 try:
-                    _tag, after = raw.split("|", 1)
-                    pair, tail = after.split("|", 1)
-                    if "\\" in pair:
-                        parent, child = pair.split("\\", 1)
-                        if child in repl_map:
-                            child = repl_map[child]
-                        pair = f"{parent}\\{child}"
-                    line = f"~M|{pair}|{tail}"
-                    fout.write(line)
+                    rec = MedicionesRecord.parse(raw)
+                    rec.map_child_codes(repl_map)
+                    fout.write(rec.to_line())
                 except Exception:
                     fout.write(raw)
 
             else:
+                # Resto de registros (~T, ~M raros, comentarios, etc.) se dejan igual
                 fout.write(raw)
 
 
