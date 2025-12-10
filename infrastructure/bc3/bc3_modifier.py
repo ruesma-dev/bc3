@@ -161,7 +161,7 @@ def _unit_normalized(unidad_raw: str) -> str:
     if not u:
         return DEFAULT_UNIT
     if u == "%":
-        return "%"
+        return "%"""
     u = u.upper()
     if any(ch.isalnum() for ch in u):
         if u in _CANON_UNITS:
@@ -281,20 +281,21 @@ def _strip_rtf_artifacts(txt: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# PASADA 2 – reescritura del BC3                                              #
+# PASADA 2 – reescritura del BC3 (interposición de CD# bajo supercapítulo)    #
 # --------------------------------------------------------------------------- #
 def convert_to_material(src: Path, dst: Path) -> None:
     """
-    Normaliza el BC3:
+    Normaliza el BC3 y **intercala CD# bajo el supercapítulo '##'**:
+      - Detecta el primer ~C cuyo código termina en '##' (p.ej. '0##') y,
+        cuando procesa su ~D, lo reescribe a 'CD#' y traslada sus hijos
+        originales a un nuevo '~D|CD#|...|'. Inserta '~C|CD#|' si no existía.
       - Trunca códigos largos (≤20).
-      - Fuerza T=3 en descompuestos originales (1/2/3) y en toda la sub-rama
-        bajo partidas reales (T=0 sin '#').
+      - Fuerza T=3 en descompuestos originales (1/2/3) y en sub-rama bajo T=0.
         Si una partida T=0 pasa a T=3, conserva su precio original.
-      - **Asegura y UNIFICA la unidad en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS**,
-        usando el set canónico: %, CM, H, KG, T, L, M, M2, M3, PA, PLANTA, UD, VIV.
+      - **Asegura y UNIFICA la unidad** en PARTIDAS (T=0 sin '#') y DESCOMPUESTOS.
       - En ~D, si qty del hijo (ex T=0 → material) es 0, usa medición ~M.
       - Limpia descripciones manteniendo separadores ~ | \.
-      - Preserva el nº exacto de '\' justo antes del '|' en cada ~D.
+      - Preserva el nº exacto de '\' justo antes del '|' en cada ~D (en las reescrituras normales).
       - En ~T, limpia artefactos RTF (sin reemplazar '|').
     """
     if not src.exists():
@@ -312,6 +313,12 @@ def convert_to_material(src: Path, dst: Path) -> None:
     repl_pattern = re.compile(
         r"(" + "|".join(re.escape(k) for k in code_map.keys()) + r")(?=[\\|])"
     ) if code_map else None
+
+    # Intercalación de CD# bajo el supercapítulo
+    need_cd_parent = ("CD#" not in tipo_map)
+    super_root: str | None = None           # p.ej. '0##'
+    super_d_rewritten = False               # si ya reescribimos su ~D
+    cd_concept_written = False              # si ya insertamos ~C|CD#|
 
     with src.open("r", encoding="latin-1", errors="ignore") as fin, \
          dst.open("w", encoding="latin-1", errors="ignore") as fout:
@@ -333,6 +340,10 @@ def convert_to_material(src: Path, dst: Path) -> None:
                 pres = parts[3]
                 tipo = parts[5]
 
+                # Si aún no hemos detectado super_root, el primero que acabe en '##'
+                if super_root is None and code.endswith("##"):
+                    super_root = code
+
                 # Truncado de código si venía largo
                 if code in code_map:
                     parts[0] = code_map[code]
@@ -351,45 +362,45 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     parts[5] = "3"
                     tipo = "3"
 
-                # === UNIDAD para PARTIDAS y DESCOMPUESTOS (primera pasada) ===
+                # === UNIDAD para PARTIDAS y DESCOMPUESTOS ===
                 is_desc = (tipo == "3") or (code in all_children) or (code in force_mat)
                 is_partida = (tipo == "0") and ("#" not in code)
                 if is_desc or is_partida:
                     parts[1] = _unit_normalized(unidad)
 
-                # Limpiamos SOLO la descripción (no tocamos precio/fecha/tipo aquí)
+                # Limpiamos SOLO la descripción
                 parts[2] = clean_text(desc)
 
                 line = f"{head}|{'|'.join(parts)}|\n"
+                fout.write(clean_text(line))
+                continue
 
             # ---------------------------  ~D  --------------------------------
-            elif raw.startswith("~D|"):
-                _, rest = raw.split("|", 1)
+            if raw.startswith("~D|"):
+                # Analizamos el ~D original para posible intercalación CD#
+                _tag, rest = raw.split("|", 1)
                 parent_code, child_part = rest.split("|", 1)
 
-                # Preservar exactamente las barras finales antes de '|'
                 body_no_nl = child_part.rstrip("\n")
+                # nº exacto de '\' antes de '|' para reescrituras normales
                 tail_bs_match = re.search(r"(\\+)\|\s*$", body_no_nl)
                 tail_bslashes = tail_bs_match.group(1) if tail_bs_match else "\\"
-
-                # Quitar solo el '|' final (no las barras)
                 if body_no_nl.endswith("|"):
                     body_no_nl = body_no_nl[:-1]
 
                 chunks = body_no_nl.split("\\")
-                new_chunks: list[str] = []
-
+                triplets: list[str] = []
                 i = 0
                 while i < len(chunks):
                     child_code = (chunks[i] if i < len(chunks) else "").strip()
                     coef = chunks[i + 1] if i + 1 < len(chunks) else ""
-                    qty = chunks[i + 2] if i + 2 < len(chunks) else ""
+                    qty  = chunks[i + 2] if i + 2 < len(chunks) else ""
                     i += 3
 
                     if not child_code:
                         continue
 
-                    # Si el hijo era T=0 y lo convertimos a material, y qty==0 → usar medición
+                    # Si el hijo era T=0 y lo convertimos a material, y qty==0 → medición
                     if tipo_map.get(child_code) == "0" and (child_code in force_mat):
                         qty_is_zero = (qty.strip() in {"", "0", "0.0", "0.00", "0,0", "0,00"})
                         if qty_is_zero:
@@ -397,16 +408,37 @@ def convert_to_material(src: Path, dst: Path) -> None:
                             if (meas is not None) and (meas > 0):
                                 qty = _fmt_num(meas)
 
-                    # Aplicar truncado a hijo si procede
+                    # Truncado de código de hijo si procede
                     child_code_out = code_map.get(child_code, child_code)
-                    new_chunks.extend([child_code_out, coef, qty])
+                    triplets.extend([child_code_out, coef, qty])
 
-                rebuilt = "\\".join(new_chunks) + tail_bslashes
+                # ¿Es el ~D del supercapítulo? Intercala CD#
+                if need_cd_parent and (super_root is not None) and (parent_code == super_root) and not super_d_rewritten:
+                    # 1) Reescribimos el ~D del supercapítulo para que SOLO cuelgue CD#
+                    #    (sin barras invertidas extra al final)
+                    fout.write(f"~D|{super_root}|CD#\\1\\1\\1|\n")
+
+                    # 2) Insertamos ~C|CD# si no existía
+                    if not cd_concept_written:
+                        fout.write("~C|CD#||COSTE DIRECTO|||0|\n")
+                        cd_concept_written = True
+
+                    # 3) Colgamos bajo CD# todos los hijos originales del supercapítulo
+                    rebuilt_children = "\\".join(triplets)  # NO añadimos tail_bslashes: salida limpia
+                    fout.write(f"~D|CD#|{rebuilt_children}|\n")
+
+                    super_d_rewritten = True
+                    continue  # ya hemos escrito lo necesario para este ~D
+
+                # Reescritura normal de ~D
+                rebuilt = "\\".join(triplets) + tail_bslashes
                 parent_code_out = code_map.get(parent_code, parent_code)
                 line = f"~D|{parent_code_out}|{rebuilt}|\n"
+                fout.write(clean_text(line))
+                continue
 
             # ---------------------------  ~T  --------------------------------
-            elif raw.startswith("~T|"):
+            if raw.startswith("~T|"):
                 # ~T|<code>|<texto_largo>|
                 try:
                     _tag, rest = raw.split("|", 1)
@@ -420,13 +452,28 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     line = f"~T|{code_out}|{txt_out}|\n"
                 except Exception:
                     line = clean_text(raw.rstrip("\n")) + "\n"
+                fout.write(clean_text(line))
+                continue
 
             # ------------------ resto de líneas ( ~M, etc. ) ------------------
-            else:
-                if repl_pattern:
-                    line = repl_pattern.sub(
-                        lambda m: code_map[m.group(1)], raw.rstrip("\n")
-                    ) + "\n"
+            if repl_pattern:
+                line = repl_pattern.sub(
+                    lambda m: code_map[m.group(1)], raw.rstrip("\n")
+                ) + "\n"
 
             # Escritura con limpieza (respeta ~ | \)
             fout.write(clean_text(line))
+
+        # Fallback: si detectamos super_root pero no vimos su ~D (caso raro),
+        # insertamos la estructura CD# al final usando children_map de la pasada 1.
+        if need_cd_parent and (super_root is not None) and not super_d_rewritten:
+            orig_children = children_map.get(super_root, [])
+            triplets = []
+            for c in orig_children:
+                c_out = code_map.get(c, c)
+                # sin conocer coef/qty originales, colgamos 1\1 (estándar)
+                triplets.extend([c_out, "1", "1"])
+            fout.write(f"~D|{super_root}|CD#\\1\\1\\1|\n")
+            if not cd_concept_written:
+                fout.write("~C|CD#||COSTE DIRECTO|||0|\n")
+            fout.write(f"~D|CD#|{'\\'.join(triplets)}|\n")
