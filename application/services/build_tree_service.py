@@ -126,7 +126,6 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
       - Crea el ~D padre→clon con can=1, coef=1, etc.
       - Evita duplicar: no inserta el clon si ya existe un ~C con ese código.
     """
-    # Leemos y, ANTES de tocar nada, indexamos los códigos ~C ya presentes
     lines = path.read_text("latin-1", errors="ignore").splitlines(keepends=True)
     existing_c_codes: set[str] = set()
     for raw in lines:
@@ -136,7 +135,6 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
                 code = rest.split("|", 1)[0]
                 existing_c_codes.add(code)
             except Exception:
-                # línea malformada: la dejamos pasar
                 pass
 
     out: list[str] = []
@@ -164,16 +162,13 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
                         continue
                     if clone.code in done:
                         continue
-                    # EVITAR DUPLICADOS ENTRE EJECUCIONES:
                     if clone.code in existing_c_codes:
-                        # Ya existe un ~C con ese código en el fichero → NO lo reinsertamos
                         done.add(clone.code)
                         continue
 
                     clone_parts = parts.copy()
                     clone_parts[0] = clone.code
 
-                    # --- precio del clon -------------------------------
                     parent_price_str = parts[3] if len(parts) > 3 else ""
                     if parent_price_str and parent_price_str.strip():
                         clone_price_str = parent_price_str.strip()
@@ -181,11 +176,9 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
                         clone_price_str = _fmt_price_str(clone.precio) or "1"
                     clone_parts[3] = clone_price_str
 
-                    # --- fecha del clon = fecha del padre (si existe) ---
                     parent_date_str = parts[4] if len(parts) > 4 else ""
                     clone_parts[4] = parent_date_str.strip() if parent_date_str else "1"
 
-                    # --- tipo del clon = material -----------------------
                     clone_parts[5] = "3"
 
                     out.append("~C|" + "|".join(clone_parts) + "|\n")
@@ -202,21 +195,35 @@ def _rewrite_bc3(path: Path, nodes: Dict[str, Node]) -> None:
 #                           PARSER PRINCIPAL                                  #
 # --------------------------------------------------------------------------- #
 def build_tree(bc3_path: Path) -> List[Node]:
+    """
+    Construye el árbol lógico a partir de un BC3 ya normalizado.
+
+    Cambios clave respecto a la versión anterior:
+      - Soporta que un MISMO código hijo cuelgue de VARIOS padres:
+        en vez de parents[child] = parent guardamos todas las relaciones
+        parent_children[parent].append(child).
+      - Esto evita que partidas como P5.15.07 se queden “sin hijos” cuando
+        comparten descompuesto con otras partidas (P5.15.08, etc.).
+    """
     nodes: Dict[str, Node] = {}
-    parents: Dict[str, str] = {}
+    parent_children: Dict[str, List[str]] = defaultdict(list)
     qty_map: Dict[str, float] = {}
     meas_map: Dict[str, List[str]] = defaultdict(list)
 
+    line_no = 0  # para debug
+
     with bc3_path.open("r", encoding="latin-1", errors="ignore") as fh:
         for raw in fh:
+            line_no += 1
             tag = raw[:2]
 
             if tag == "~C":
                 _, rest = raw.split("|", 1)
-                code, unidad, desc, pres, _, t = rest.rstrip("\n").split("|")[:6]
+                parts = rest.rstrip("\n").split("|")
+                while len(parts) < 6:
+                    parts.append("")
+                code, unidad, desc, pres, _, t = parts[:6]
 
-                # Fallback: si T∈{0,1,2,3}, no es estructural (sin '#') y la
-                # descripción corta está vacía, usar el código como descripción.
                 desc_clean = clean_text(desc)
                 if (t in {"0", "1", "2", "3"}) and ("#" not in code) and not desc_clean.strip():
                     desc_clean = code
@@ -231,7 +238,10 @@ def build_tree(bc3_path: Path) -> List[Node]:
 
             elif tag == "~T":
                 _, rest = raw.split("|", 1)
-                code, txt = rest.rstrip("\n").split("|", 1)
+                try:
+                    code, txt = rest.rstrip("\n").split("|", 1)
+                except ValueError:
+                    code, txt = rest.rstrip("\n"), ""
                 if code in nodes and nodes[code].long_desc is None:
                     nodes[code].long_desc = clean_text(txt)
 
@@ -239,10 +249,11 @@ def build_tree(bc3_path: Path) -> List[Node]:
                 _, rest = raw.split("|", 1)
                 parent_code, child_part = rest.split("|", 1)
                 chunks = child_part.rstrip("|\n").split("\\")
+
                 for i in range(0, len(chunks), 3):
                     child_code = chunks[i].strip()
                     if child_code:
-                        parents[child_code] = parent_code
+                        parent_children[parent_code].append(child_code)
                         canp = chunks[i + 2] if i + 2 < len(chunks) else ""
                         if _NUM.match(canp):
                             qty_map[child_code] = float(canp.replace(",", "."))
@@ -253,12 +264,40 @@ def build_tree(bc3_path: Path) -> List[Node]:
                     code = body.split("\\", 1)[1].split("|", 1)[0]
                     meas_map[code].append(raw.rstrip())
 
-    # jerarquía
-    for ch, p in parents.items():
-        if ch in nodes and p in nodes:
-            nodes[p].add_child(nodes[ch])
+    print(
+        "[BT DEBUG] build_tree() – leídos:",
+        f"nodes={len(nodes)}, parent_children={len(parent_children)},",
+        f"qty_map={len(qty_map)}, meas_map={len(meas_map)}",
+    )
 
-    # datos numéricos
+    # DEBUG específico para el caso P5.14.03.06 DESC. y P5.15.07 / P5.15.08
+    suspect_child = "P5.14.03.06 DESC."
+    if suspect_child in parent_children:
+        print(f"[BT DEBUG] padres de {suspect_child!r}: {parent_children[suspect_child]!r}")
+    else:
+        print(f"[BT DEBUG] {suspect_child!r} no aparece como hijo en ningún ~D")
+
+    # ---------------------- jerarquía con DEBUG ------------------------------
+    missing_links = 0
+    for parent, children in parent_children.items():
+        for ch in children:
+            has_parent = parent in nodes
+            has_child = ch in nodes
+            if has_parent and has_child:
+                nodes[parent].add_child(nodes[ch])
+            else:
+                missing_links += 1
+                if missing_links <= 50:
+                    print(
+                        "[BT DEBUG] enlace padre-hijo NO creado:",
+                        f"parent={parent!r} (en nodes={has_parent})",
+                        f"child={ch!r} (en nodes={has_child})",
+                    )
+
+    if missing_links:
+        print(f"[BT DEBUG] enlaces omitidos por falta de nodo padre/hijo: {missing_links}")
+
+    # ---------------------- datos numéricos ---------------------------------
     for c, n in nodes.items():
         if c in qty_map:
             n.can_pres = qty_map[c]
@@ -266,13 +305,13 @@ def build_tree(bc3_path: Path) -> List[Node]:
             n.measurements = meas_map[c]
         n.compute_total()
 
-    # pasada extra (descompuestos huérfanos y partidas sin hijos)
+    # ---------------------- pasada extra (clones) ---------------------------
     _add_missing_clones(nodes)
 
-    # escribir cambios en BC3
+    # ---------------------- escribir cambios en BC3 -------------------------
     _rewrite_bc3(bc3_path, nodes)
 
-    # raíces
+    # ---------------------- raíces -----------------------------------------
     child_codes = {c.code for n in nodes.values() for c in n.children}
     roots = [n for n in nodes.values() if n.code not in child_codes]
     return sorted(roots, key=lambda n: n.code)
