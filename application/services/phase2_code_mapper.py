@@ -450,27 +450,37 @@ def _parse_catalog_desc(desc: str) -> Dict[str, str]:
 # --------------------------- reglas lingüísticas grupo ---------------------- #
 def _infer_group_from_phrases(text: str) -> Optional[str]:
     """
-    Reglas:
+    Reglas actualizadas:
+      - 'suministro' + 'material'/'materiales' -> SUBCONTRATA CON APORTE MATERIALES
       - 'suministro y colocacion|montaje|aplicacion' -> SUBCONTRATA CON APORTE MATERIALES
       - Si menciona 'incluye' y 'mano de obra' y 'material(es)' -> SUBCONTRATA CON APORTE MATERIALES
-      - 'suministro' solo -> MATERIALES
-      - 'montaje' o 'aplicacion' solo -> SUBCONTRATA MANO DE OBRA
+      - Solo 'montaje' o 'aplicacion' (sin suministro) -> SUBCONTRATA MANO DE OBRA
+      - 'suministro' sin materiales explícitos -> SUBCONTRATA MANO DE OBRA
     """
     t = _normalize_space_lower(clean_text(text))
     has_sum = "suministro" in t
     has_mont = ("montaje" in t) or ("colocacion" in t) or ("colocación" in t)
     has_apli = ("aplicacion" in t) or ("aplicación" in t)
-    has_incluye = "incluye" in t or "incluido" in t or "incluida" in t or "incluidos" in t
+    has_incluye = any(w in t for w in ("incluye", "incluido", "incluida", "incluidos"))
     has_mo = "mano de obra" in t or "elaboracion" in t or "elaboración" in t
     has_mat = "material" in t or "materiales" in t
 
-    # reglas fuertes
-    if (has_sum and (has_mont or has_apli)) or (has_incluye and has_mo and has_mat):
+    # 1) Casos claros de SUBCONTRATA CON APORTE MATERIALES
+    if (
+        (has_sum and (has_mont or has_apli))            # suministro + colocación/montaje/aplicación
+        or (has_incluye and has_mo and has_mat)        # incluye + MO + materiales
+        or (has_sum and has_mat)                       # suministro + materiales explícitos
+    ):
         return "SUBCONTRATA CON APORTE MATERIALES"
-    if has_sum:
-        return "MATERIALES"
-    if has_mont or has_apli or (has_incluye and has_mo):
+
+    # 2) Solo mano de obra (montaje / aplicación sin suministro)
+    if (has_mont or has_apli or (has_incluye and has_mo)) and not has_sum:
         return "SUBCONTRATA MANO DE OBRA"
+
+    # 3) Suministro sin materiales explícitos -> subcontrata genérica (MO)
+    if has_sum:
+        return "SUBCONTRATA MANO DE OBRA"
+
     return None
 
 
@@ -696,7 +706,8 @@ def _compose_super_prompt(
     """
     Construye el prompt EXACTO que pediste, incluyendo la TABLA DE CANDIDATOS.
     """
-    # Construimos la tabla legible
+
+    # 1) Tabla de candidatos legible
     rows = [_candidate_as_row(c) for c in candidates]
     tabla = []
     for r in rows:
@@ -709,30 +720,52 @@ def _compose_super_prompt(
         )
     tabla_str = "\n".join(tabla)
 
-    # Few-shots (opcionales)
+    # 2) Few-shots (opcionales)
     few = []
     for ex in fewshots or []:
-        few.append(f"# DESCRIPCION (contexto ejemplo):\n{ex.get('context','')}\n#CODIGO: {ex.get('best_code','')}")
+        few.append(
+            f"# DESCRIPCION (contexto ejemplo):\n{ex.get('context','')}\n"
+            f"#CODIGO: {ex.get('best_code','')}"
+        )
     fewshots_str = "\n\n".join(few) if few else ""
 
-    # pistas extra (tipo/grupo)
+    # 3) Pistas extra (tipo/grupo) que se incrustan en el prompt
     restr_tipo = ""
     if tipo_objetivo:
         restr_tipo = (
             f"IMPORTANTE: Este descompuesto pertenece a **{tipo_objetivo}**. "
-            f"No puedes elegir candidatos de un tipo diferente."
+            f"No puedes elegir candidatos de un tipo diferente.\n"
         )
-    pista_grupo = f"Pista de grupo sugerido: {grupo_objetivo}." if grupo_objetivo else ""
 
-    # PROMPT final
+    pista_grupo = ""
+    if grupo_objetivo:
+        pista_grupo = f"Pista de grupo sugerido: {grupo_objetivo}.\n"
+
+    # 4) Prompt final
     prompt = f"""##ROL:Eres un clasificador experto en presupuestos de obra (España) y catálogo de productos.
 ##OBJETIVO:Tienes que asignar un código de producto a un DESCOMPUESTO de PRESTO.
-##CONTEXTO: Los candidatos estan en la tabla de candidatos que adjunto. el candidato es la columna Codigo producto. En la columna descripcion producto esta la descripcion del candidato para darte contexto, es lo que tienes que casar con las descripciones que te dare. en la columna descripcion familia, esta el siguiente nivel, en la descripcion grupo descripcion grupo el siguiente nivel a ese, y en la columna Descripcion tipo tipo, esta el primer nivel. Si en el contexto del producto a clasificar aparece sumnistro y colocacion o montaje, entonces pertenece al grupo SUBCONTRATA CON APORTE MATERIALES, si pone colocacion o montaje unicamente, pertenece al grupo SUBCONTRATA MANO DE OBRA, y si pone suministro es del tipo MATERIAL. Si el precio incluye elaboración y mano de obra significa que es una SUBCONTRATA CON APORTE MATERIALES. Siempre que en la partida se habla de incluir o que forma parte la mano de obra, elaboración o cualquier actividad similar significa que es una SUCONTRATA, si además incluye materiales o habla de estos entonces es con APORTE DE MATERIAL
-{restr_tipo}
-{pista_grupo}
-##INPUT: te voy a dar la descripcion corta y larga del descompuesto, asi como las descripciones de su padres (partidas y capitulos). con ese contexto debes seleccionar entre los candidatos.
-##REGLAS: SOLO puedes elegir un código de entre la lista de CANDIDATOS. Si ninguno encaja bien, elige el menos malo, con confianza baja. Da mucha importancia a: Tipo (Coste Directo/Indirecto), Grupo y Familia; también al contexto jerárquico. Prohibido inventar códigos: solo candidatos dados. No puedes elegir candidatos de un nivel distinto (p. ej. si es Coste Directo, evita familias de Coste Indirecto)
-##OUTPUT:Responde en una sola línea: {{"best_code":"<code>", "confidence":<0..1>, "rationale":"<≤20 palabras>"}} En el rationale dame la descripcion de producto, y familia que has elegido y la razón de la elección. Cuando tengas el código revisa que la descripción y familia de este coincide con lo que tienes planteado en rationale, después de esta revisión si es necesario cambialo para que se parezca al rationale
+##CONTEXTO: Los candidatos estan en la tabla de candidatos que adjunto. El candidato es la columna Codigo producto. 
+En la columna Descripcion producto está la descripción del candidato para darte contexto, es lo que tienes que casar con las descripciones que te daré. 
+En la columna Descripcion familia está el siguiente nivel, en la columna Descripcion grupo el siguiente nivel a ese, y en la columna Descripcion tipo el primer nivel.
+
+Si en el contexto del producto a clasificar aparece 'suministro y colocacion', 'suministro y montaje', 'suministro y aplicacion' o frases que combinen suministro con mano de obra, 
+o si aparecen a la vez palabras como 'suministro' y 'material'/'materiales', entonces pertenece al grupo SUBCONTRATA CON APORTE MATERIALES.
+
+Si solo aparece montaje/aplicacion (sin suministro) pertenece al grupo SUBCONTRATA MANO DE OBRA.
+
+Si aparece 'suministro' sin mencionar materiales de forma explicita lo consideraremos SUBCONTRATA MANO DE OBRA (servicio sin aporte relevante de materiales).
+
+Si el precio incluye elaboracion y mano de obra significa que es una SUBCONTRATA CON APORTE MATERIALES. Siempre que en la partida se habla de incluir o que forma parte la mano de obra, 
+elaboracion o cualquier actividad similar significa que es una SUBCONTRATA; si ademas incluye materiales o habla de estos entonces es con APORTE DE MATERIAL.
+{restr_tipo}{pista_grupo}##INPUT: te voy a dar la descripcion corta y larga del descompuesto, asi como las descripciones de sus padres (partidas y capitulos). 
+Con ese contexto debes seleccionar entre los candidatos.
+##REGLAS: SOLO puedes elegir un código de entre la lista de CANDIDATOS. Si ninguno encaja bien, elige el menos malo, con confianza baja. 
+Da mucha importancia a: Tipo (Coste Directo/Indirecto), Grupo y Familia; también al contexto jerárquico. 
+Prohibido inventar códigos: solo candidatos dados. No puedes elegir candidatos de un nivel distinto (p. ej. si es Coste Directo, evita familias de Coste Indirecto)
+##OUTPUT:Responde en una sola línea: {{"best_code":"<code>", "confidence":<0..1>, "rationale":"<≤20 palabras>"}}. 
+En el rationale dame la descripcion de producto y familia que has elegido y la razón de la elección. 
+Cuando tengas el código revisa que la descripción y familia de este coincide con lo que tienes planteado en el rationale; 
+después de esta revisión si es necesario cambialo para que se parezca al rationale.
 
 ### TABLA DE CANDIDATOS
 {tabla_str}
@@ -744,6 +777,8 @@ def _compose_super_prompt(
 {fewshots_str}
 """
     return prompt
+
+
 
 
 # --------------------------- heurística opcional ---------------------------- #
@@ -862,15 +897,40 @@ def _build_replacement_map(
     Devuelve:
       - repl_map: dict old_code -> new_code
       - rows: lista de (old_code, new_code, confidence, method)
+
     Reglas:
       - Si el código contiene '%', usar **% DESCUENTO#** (método='rule').
-      - Prefiltro: simple o heurístico con hints del Excel (Tipo/Grupo/Familia).
-      - LLM con few-shots embebidos + restricción de Tipo en el prompt.
+      - AHORA: al LLM se le pasan TODOS los productos del catálogo como candidatos.
+      - La heurística solo se usa para:
+          * inferir tipo/grupo objetivo desde el contexto,
+          * elegir un fallback razonable si el LLM falla o da baja confianza.
+      - (Opcional) volcado de prompts a disco si PHASE2_PROMPT_DUMP_DIR está definido.
     """
     if use_heuristics is None:
         use_heuristics = os.getenv("PHASE2_USE_HEURISTICS", "false").lower() == "true"
 
     hints = _load_hints_from_env_or_arg(hints_tree_xlsx)
+
+    # --- Directorio para volcar prompts: ENV o carpeta 'prompts' junto al BC3 ---
+    raw_dump_dir = os.getenv("PHASE2_PROMPT_DUMP_DIR", "").strip()
+    print(f"[PHASE2 DEBUG] PHASE2_PROMPT_DUMP_DIR (raw) = '{raw_dump_dir}'")
+
+    prompt_dump_path: Optional[Path] = None
+    if raw_dump_dir:
+        # Quitar comillas y expandir ~ y variables de entorno
+        cleaned = raw_dump_dir.strip().strip('"').strip("'")
+        dump_dir = Path(os.path.expandvars(os.path.expanduser(cleaned)))
+    else:
+        # Si no hay ENV, volcamos en <carpeta_del_bc3>/prompts
+        dump_dir = bc3_path.with_suffix("").parent / "prompts"
+
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dump_path = dump_dir
+        print(f"[PHASE2 DEBUG] Volcando prompts en: {prompt_dump_path}")
+    except Exception as e:
+        print(f"[PHASE2 WARN] No se pudo crear directorio de prompts {dump_dir}: {e}")
+        prompt_dump_path = None
 
     # Few-shots (ENV tiene prioridad)
     fewshots = _load_fewshots_from_env() or fewshots or DEFAULT_FEWSHOTS
@@ -878,7 +938,7 @@ def _build_replacement_map(
     catalog = load_catalog(catalog_path)  # [{"code":..., "desc":...}, ...]
     concepts, _longs, parent_of, _children = _collect_bc3_info(bc3_path)
 
-    # Rate limit
+    # Rate limit para Gemini
     rpm = int(os.getenv("GEMINI_RPM", "10") or "10")
     limiter = RateLimiter(rpm=rpm)
 
@@ -891,12 +951,17 @@ def _build_replacement_map(
     discount_counter = 0  # contador para % DESCUENTO
 
     def unique_assign(base: str) -> str:
-        """Garantiza unicidad y long máx 20. Para '% DESCUENTO' numera 1..N."""
+        """
+        Garantiza unicidad y longitud máxima 20.
+        - Para '% DESCUENTO' numera 1..N.
+        - Para el resto usa sufijos alfabéticos (a, b, c, ...).
+        """
         nonlocal discount_counter
         if base.startswith("% DESCUENTO"):
             discount_counter += 1
             code = f"% DESCUENTO{discount_counter}"
             return code[:MAX_CODE_LEN]
+
         if base not in assigned:
             assigned[base] = 0
             code = base[:MAX_CODE_LEN]
@@ -904,6 +969,7 @@ def _build_replacement_map(
             assigned[base] += 1
             suf = _letters_suffix(assigned[base])
             code = _safe_with_suffix(base, suf)
+
         n = 0
         c0 = code
         while code in used:
@@ -916,7 +982,7 @@ def _build_replacement_map(
     repl: Dict[str, str] = {}
     rows: List[Tuple[str, str, float, str]] = []
 
-    # Recolectamos descompuestos
+    # Recolectamos descompuestos (tipos 1/2/3, sin '#')
     targets: List[str] = []
     for code, c in concepts.items():
         if "#" in code:
@@ -935,19 +1001,28 @@ def _build_replacement_map(
         for code in group:
             c = concepts[code]
 
-            # Regla de descuentos
+            # Regla fija para descuentos con '%'
             if "%" in code:
                 newc = unique_assign("% DESCUENTO")
                 repl[code] = newc
                 rows.append((code, newc, 1.0, "rule"))
                 continue
 
-            # Contexto base
+            # Contexto base (incluye padres con desc corta/larga vía _context_for)
             ctx = _context_for(code, concepts, parent_of)
 
-            # Prefiltro (con hints + reglas)
+            # Señales desde el contexto (tipo y grupo objetivo) SIN filtrar candidatos
+            sig = _extract_signals_from_context(ctx, c, hints)
+            tipo_obj = sig["tipo_sugerido"]
+            grupo_obj = sig["grupo_sugerido"]
+            tipo_obj_map[code] = tipo_obj
+
+            # Candidatos para el LLM: TODO el catálogo completo
+            top_candidates = catalog
+
+            # Usamos la heurística SOLO para escoger un buen fallback (no para limitar el set)
             k = int(os.getenv("PREFILTER_TOPK", str(topk)) or topk)
-            top_candidates, tipo_obj = _prefilter_candidates(
+            heur_top, _ = _prefilter_candidates(
                 concept=c,
                 ctx=ctx,
                 catalog=catalog,
@@ -955,20 +1030,32 @@ def _build_replacement_map(
                 hints=hints,
                 use_heuristics=bool(use_heuristics),
             )
-            tipo_obj_map[code] = tipo_obj
+            if heur_top:
+                fallback_code = heur_top[0]["code"]
+            else:
+                # fallback extremo: primer producto del catálogo
+                fallback_code = catalog[0]["code"]
+            fallbacks[code] = fallback_code
 
-            # Super-prompt con few-shots + restricción de Tipo
+            # Construimos el super-prompt con TODO el catálogo
             super_ctx = _compose_super_prompt(
                 context=ctx,
                 candidates=top_candidates,
                 fewshots=fewshots,
                 tipo_objetivo=tipo_obj,
-                grupo_objetivo=_infer_group_from_phrases(f"{c.desc_short} {c.long_desc or ''}"),
+                grupo_objetivo=grupo_obj,
                 familias_hints=hints.familias,
             )
 
-            # Fallback si el LLM falla/devuelve baja confianza
-            fallbacks[code] = top_candidates[0]["code"]
+            # Volcado opcional del prompt a disco para inspección
+            if prompt_dump_path is not None:
+                safe_code = re.sub(r"[^A-Za-z0-9_.-]+", "_", code)
+                out_file = prompt_dump_path / f"{safe_code}.txt"
+                try:
+                    with out_file.open("w", encoding="utf-8") as df:
+                        df.write(super_ctx)
+                except Exception as e:
+                    print(f"[PHASE2 WARN] No se pudo escribir prompt {out_file}: {e}")
 
             group_payload.append({
                 "id": code,
@@ -976,27 +1063,31 @@ def _build_replacement_map(
                 "candidates": [{"code": cc["code"], "desc": cc["desc"]} for cc in top_candidates],
             })
 
-        # Si todo eran descuentos en el grupo, saltamos a siguiente
+        # Si todo el grupo eran descuentos, saltamos a siguiente bloque
         if not group_payload:
             idx += len(group)
             continue
 
         try:
             if batch_mode:
-                results = choose_best_code_batch_with_llm(group_payload, limiter=RateLimiter(rpm=rpm))
+                results = choose_best_code_batch_with_llm(group_payload, limiter=limiter)
                 by_id = {r.get("id"): r for r in results if isinstance(r, dict)}
+
                 for item in group_payload:
                     code = item["id"]
                     if code in repl:
                         continue
+
                     r = by_id.get(code) or {}
                     best = (r.get("best_code") or "").strip()
                     conf = float(r.get("confidence", 0.0))
 
-                    # Si hay restricción de tipo, invalidamos best si viola
+                    # Validación de tipo: si el LLM viola el tipo objetivo, forzamos fallback
                     tipo_obj = tipo_obj_map.get(code)
                     if best:
-                        parts = _parse_catalog_desc(next((c["desc"] for c in item["candidates"] if c["code"] == best), ""))
+                        parts = _parse_catalog_desc(
+                            next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
+                        )
                         if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
                             best = ""  # fuerza fallback
 
@@ -1007,14 +1098,17 @@ def _build_replacement_map(
                     else:
                         method = "llm"
                         conf_used = conf
+
                     newc = unique_assign(best)
                     repl[code] = newc
                     rows.append((code, newc, float(conf_used), method))
+
             else:
                 for item in group_payload:
                     code = item["id"]
                     if code in repl:
                         continue
+
                     llm = choose_best_code_with_llm(item["context"], item["candidates"], limiter=limiter)
                     best = (llm.get("best_code") or "").strip()
                     conf = float(llm.get("confidence", 0.0))
@@ -1022,7 +1116,9 @@ def _build_replacement_map(
                     # Validación de tipo tras LLM
                     tipo_obj = tipo_obj_map.get(code)
                     if best:
-                        parts = _parse_catalog_desc(next((c["desc"] for c in item["candidates"] if c["code"] == best), ""))
+                        parts = _parse_catalog_desc(
+                            next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
+                        )
                         if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
                             best = ""  # fuerza fallback
 
@@ -1033,11 +1129,13 @@ def _build_replacement_map(
                     else:
                         method = "llm"
                         conf_used = conf
+
                     newc = unique_assign(best)
                     repl[code] = newc
                     rows.append((code, newc, float(conf_used), method))
+
         except Exception:
-            # Fallback masivo si hay error con el LLM
+            # Fallback masivo si hay error con el LLM (timeout, etc.)
             for item in group_payload:
                 code = item["id"]
                 if code in repl:
@@ -1051,6 +1149,7 @@ def _build_replacement_map(
         idx += len(group)
 
     return repl, rows
+
 
 
 # --------------------------- reescritura BC3 -------------------------------- #
