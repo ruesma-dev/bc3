@@ -6,7 +6,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Any, Callable
+from typing import List, Optional, Any
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -27,7 +27,7 @@ except Exception:
 # --------------------------------------------------------------------------- #
 #  Configuración visual y presets                                             #
 # --------------------------------------------------------------------------- #
-APP_VERSION = "0.993 capitulo padre"
+APP_VERSION = "0.995 redondeo"
 APP_TITLE = "Limpieza de BC3"
 
 # Nombres de fichero aceptados por defecto para el catálogo IA externo
@@ -45,12 +45,12 @@ DEV_CATALOG_PATHS = [
 
 # Modelos Gemini (free tier) y límites orientativos
 MODEL_PRESETS = {
-    "gemini-3-pro-preview":        {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
-    "gemini-2.5-pro":        {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
-    "gemini-2.5-flash":      {"RPM": 10, "TPM": 250_000,  "RPD": 250},
-    "gemini-2.5-flash-lite": {"RPM": 15, "TPM": 250_000,  "RPD": 1000},
-    "gemini-2.0-flash":      {"RPM": 15, "TPM": 1_000_000, "RPD": 200},
-    "gemini-2.0-flash-lite": {"RPM": 30, "TPM": 1_000_000, "RPD": 200},
+    "gemini-3-pro-preview":   {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
+    "gemini-2.5-pro":         {"RPM": 5,  "TPM": 250_000,  "RPD": 100},
+    "gemini-2.5-flash":       {"RPM": 10, "TPM": 250_000,  "RPD": 250},
+    "gemini-2.5-flash-lite":  {"RPM": 15, "TPM": 250_000,  "RPD": 1000},
+    "gemini-2.0-flash":       {"RPM": 15, "TPM": 1_000_000, "RPD": 200},
+    "gemini-2.0-flash-lite":  {"RPM": 30, "TPM": 1_000_000, "RPD": 200},
 }
 DEFAULT_MODEL = "gemini-3-pro-preview"
 
@@ -235,39 +235,67 @@ class App(tk.Tk):
         card.columnconfigure(1, weight=1)
         card.columnconfigure(4, weight=1)
 
-        ttk.Label(card, text="Fichero BC3:", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=(4, 8))
+        ttk.Label(card, text="Fichero BC3:", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(4, 8)
+        )
         self.entry_input = ttk.Entry(card)
         self.entry_input.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.btn_browse_input = ttk.Button(card, text="Buscar…", command=self._on_browse_input)
         self.btn_browse_input.grid(row=0, column=2, sticky="ew")
 
-        ttk.Label(card, text="Catálogo (IA):", font=("Segoe UI", 10, "bold")).grid(row=0, column=3, sticky="w", padx=(16, 8))
+        ttk.Label(card, text="Catálogo (IA):", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=3, sticky="w", padx=(16, 8)
+        )
         self.entry_catalog = ttk.Entry(card)
         self.entry_catalog.grid(row=0, column=4, sticky="ew", padx=(0, 8))
         self.btn_browse_catalog = ttk.Button(card, text="Buscar…", command=self._on_browse_catalog)
         self.btn_browse_catalog.grid(row=0, column=5, sticky="ew")
 
-        ttk.Label(card, text="Modelo IA:", font=("Segoe UI", 10, "bold")).grid(row=1, column=0, sticky="w", padx=(4, 8), pady=(10, 0))
+        ttk.Label(card, text="Modelo IA:", font=("Segoe UI", 10, "bold")).grid(
+            row=1, column=0, sticky="w", padx=(4, 8), pady=(10, 0)
+        )
         self.model_var = tk.StringVar(value=self.model_name)
-        self.cmb_model = ttk.Combobox(card, textvariable=self.model_var, state="readonly",
-                                      values=list(MODEL_PRESETS.keys()), width=24)
+        self.cmb_model = ttk.Combobox(
+            card,
+            textvariable=self.model_var,
+            state="readonly",
+            values=list(MODEL_PRESETS.keys()),
+            width=24,
+        )
         self.cmb_model.grid(row=1, column=1, sticky="w", pady=(10, 0))
         self.cmb_model.bind("<<ComboboxSelected>>", self._on_model_change)
 
         self.lbl_limits = ttk.Label(card, text=self._limits_text(), font=("Segoe UI", 9))
         self.lbl_limits.grid(row=1, column=2, columnspan=4, sticky="w", pady=(10, 0), padx=(10, 0))
 
+        # Checkbox para activar/desactivar el redondeo de partidas
+        self.round_partidas_var = tk.BooleanVar(value=False)
+        self.chk_round_partidas = ttk.Checkbutton(
+            card,
+            text="Redondear partidas (precio y medición) a 2 decimales",
+            variable=self.round_partidas_var,
+        )
+        self.chk_round_partidas.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0), padx=(4, 0))
+
         # --- Acciones ---
         actions = ttk.Frame(body, padding=(0, 4))
         actions.grid(row=1, column=0, sticky="e")
 
-        self.btn_clean = ttk.Button(actions, text="LIMPIAR (1ª pasada)",
-                                    command=self._run_clean_clicked, style="Primary.TButton")
+        self.btn_clean = ttk.Button(
+            actions,
+            text="LIMPIAR (1ª pasada)",
+            command=self._run_clean_clicked,
+            style="Primary.TButton",
+        )
         self.btn_clean.grid(row=0, column=0, padx=(0, 8))
 
-        self.btn_phase2 = ttk.Button(actions, text="ASIGNAR PRODUCTOS (IA)",
-                                     command=self._run_phase2_clicked, style="Secondary.TButton",
-                                     state=("normal" if HAS_PHASE2 else "disabled"))
+        self.btn_phase2 = ttk.Button(
+            actions,
+            text="ASIGNAR PRODUCTOS (IA)",
+            command=self._run_phase2_clicked,
+            style="Secondary.TButton",
+            state=("normal" if HAS_PHASE2 else "disabled"),
+        )
         self.btn_phase2.grid(row=0, column=1)
 
         # --- Log ---
@@ -276,14 +304,18 @@ class App(tk.Tk):
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
 
-        ttk.Label(log_card, text="Log de ejecución", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(log_card, text="Log de ejecución", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
         self.txt_log = tk.Text(log_card, height=18, wrap="word", font=("Consolas", 10))
         self.txt_log.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
         self._init_log_tags()
 
         log_buttons = ttk.Frame(log_card)
         log_buttons.grid(row=2, column=0, sticky="e")
-        ttk.Button(log_buttons, text="Abrir carpeta output", command=self._open_output_folder).grid(row=0, column=0)
+        ttk.Button(log_buttons, text="Abrir carpeta output", command=self._open_output_folder).grid(
+            row=0, column=0
+        )
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self, padding=(14, 8))
@@ -307,10 +339,22 @@ class App(tk.Tk):
         self.txt_log.tag_configure("time", foreground="#555")
         self.txt_log.tag_configure("ok", foreground="#0F8F3B")
         self.txt_log.tag_configure("err", foreground="#B00020")
-        self.txt_log.tag_configure("banner_ok", font=("Segoe UI", 16, "bold"), foreground="#0F8F3B",
-                                   spacing1=10, spacing3=10, justify="center")
-        self.txt_log.tag_configure("banner_fail", font=("Segoe UI", 16, "bold"), foreground="#B00020",
-                                   spacing1=10, spacing3=10, justify="center")
+        self.txt_log.tag_configure(
+            "banner_ok",
+            font=("Segoe UI", 16, "bold"),
+            foreground="#0F8F3B",
+            spacing1=10,
+            spacing3=10,
+            justify="center",
+        )
+        self.txt_log.tag_configure(
+            "banner_fail",
+            font=("Segoe UI", 16, "bold"),
+            foreground="#B00020",
+            spacing1=10,
+            spacing3=10,
+            justify="center",
+        )
 
     def _append(self, msg: str, tag: Optional[str] = None) -> None:
         """Inserta en log (llamar siempre desde el hilo principal)."""
@@ -424,7 +468,10 @@ class App(tk.Tk):
             return
         cleaned = self._cleaned_bc3_path()
         if not cleaned.exists():
-            messagebox.showerror("Fase 2 (IA)", f"No encuentro el BC3 limpio:\n{cleaned}\n\nEjecuta antes la 1ª pasada.")
+            messagebox.showerror(
+                "Fase 2 (IA)",
+                f"No encuentro el BC3 limpio:\n{cleaned}\n\nEjecuta antes la 1ª pasada.",
+            )
             return
         if not self._ensure_catalog():
             return
@@ -444,10 +491,25 @@ class App(tk.Tk):
             cleaned_bc3 = self._cleaned_bc3_path()
             tree_csv = out_dir / f"{src.stem}_tree.csv"
 
-            self._append_async(f"Normalizando BC3 → {cleaned_bc3.name}")
-            convert_to_material(src, cleaned_bc3)
+            do_round = bool(self.round_partidas_var.get())
+            self._append_async(
+                f"Normalizando BC3 → {cleaned_bc3.name} (round_partidas={do_round})"
+            )
 
-            self._append_async(f"Construyendo árbol y exportando CSV → {tree_csv.name}")
+            # Intento 1: firma nueva con parámetro round_partidas
+            try:
+                convert_to_material(
+                    src=src,
+                    dst=cleaned_bc3,
+                    round_partidas=do_round,
+                )
+            except TypeError:
+                # Firma antigua (sin round_partidas): fallback
+                convert_to_material(src, cleaned_bc3)
+
+            self._append_async(
+                f"Construyendo árbol y exportando CSV → {tree_csv.name}"
+            )
             roots = build_tree(cleaned_bc3)
             export_to_csv(roots, tree_csv)
 
@@ -521,7 +583,9 @@ class App(tk.Tk):
             def progress(ev: Any):
                 nonlocal processed
                 processed += 1
-                line = self._format_progress_event(ev, processed, total if total else processed)
+                line = self._format_progress_event(
+                    ev, processed, total if total else processed
+                )
                 self._append_async(line)
 
             self._append_async(f"Asignando productos → {out_phase2.name}")
@@ -589,14 +653,19 @@ class App(tk.Tk):
     def _ensure_catalog(self) -> bool:
         p = self.entry_catalog.get().strip()
         if not p:
-            messagebox.showerror("Catálogo", "No se ha encontrado el catálogo IA. Selecciónalo o colócalo en /resources.")
+            messagebox.showerror(
+                "Catálogo",
+                "No se ha encontrado el catálogo IA. Selecciónalo o colócalo en /resources.",
+            )
             return False
         self.catalog_path = Path(p)
         if not self.catalog_path.exists():
             messagebox.showerror("Catálogo", f"No existe: {self.catalog_path}")
             return False
         if self.catalog_path.suffix.lower() not in {".xlsx", ".xls", ".csv"}:
-            messagebox.showwarning("Catálogo", "Formato no estándar. Se esperan .xlsx/.xls/.csv")
+            messagebox.showwarning(
+                "Catálogo", "Formato no estándar. Se esperan .xlsx/.xls/.csv"
+            )
         return True
 
     def _cleaned_bc3_path(self) -> Path:
@@ -604,7 +673,9 @@ class App(tk.Tk):
         return src.with_name(f"{src.stem}_limpio.bc3")
 
     def _open_output_folder(self) -> None:
-        target = self.last_output_dir or (self.input_path.parent if self.input_path else Path.cwd())
+        target = self.last_output_dir or (
+            self.input_path.parent if self.input_path else Path.cwd()
+        )
         try:
             if sys.platform.startswith("win"):
                 os.startfile(str(target))  # type: ignore[attr-defined]
@@ -613,7 +684,10 @@ class App(tk.Tk):
             else:
                 os.system(f'xdg-open "{target}"')
         except Exception as e:
-            messagebox.showerror("Abrir carpeta", f"No se pudo abrir la carpeta:\n{target}\n\n{e}")
+            messagebox.showerror(
+                "Abrir carpeta",
+                f"No se pudo abrir la carpeta:\n{target}\n\n{e}",
+            )
 
 
 # --------------------------------------------------------------------------- #

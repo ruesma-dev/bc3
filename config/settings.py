@@ -1,8 +1,7 @@
-# config/settings.py
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -34,3 +33,9 @@ class Settings:
 
     # Logging
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # Switch para activar/desactivar el redondeo de partidas
+    # (precio unitario y medición de partidas, no descompuestos)
+    round_partidas: bool = field(
+        default_factory=lambda: os.getenv("ROUND_PARTIDAS", "false").strip().lower() == "true"
+    )

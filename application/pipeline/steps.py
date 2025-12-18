@@ -27,7 +27,7 @@ class TransformBC3Step(Step):
         out_dir.mkdir(parents=True, exist_ok=True)
         mod_file = out_dir / "presupuesto_material.bc3"
 
-        # Intento con firma nueva (parametrizada) y fallback a firma antigua
+        # Intento con firma "rica" (la que usa Settings) y con redondeo
         try:
             convert_to_material(
                 src=ctx.original_path,
@@ -36,10 +36,19 @@ class TransformBC3Step(Step):
                 fill_unit_ud=ctx.settings.fill_unit_ud,
                 force_material=ctx.settings.force_material,
                 encoding=ctx.settings.encoding,
+                round_partidas=ctx.settings.round_partidas,
             )
         except TypeError:
-            # Firma antigua: convert_to_material(src, dst)
-            convert_to_material(ctx.original_path, mod_file)
+            # Firmas antiguas: probamos primero con (src, dst, round_partidas)
+            try:
+                convert_to_material(
+                    ctx.original_path,
+                    mod_file,
+                    round_partidas=ctx.settings.round_partidas,
+                )
+            except TypeError:
+                # Último fallback: firma muy antigua convert_to_material(src, dst)
+                convert_to_material(ctx.original_path, mod_file)
 
         ctx.modified_path = mod_file
         print(f"BC3 modificado  →  {mod_file.resolve()}")

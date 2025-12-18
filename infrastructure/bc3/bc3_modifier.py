@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 from collections import defaultdict
 from utils.text_sanitize import clean_text
+import os
 
 # --- constantes ---
 MAX_CODE_LEN = 20
@@ -29,6 +30,14 @@ def _fmt_num(value: float | None) -> str:
         return ""
     # Evita notación científica y usa punto
     return f"{value:.15g}".replace(",", ".")
+
+def _fmt_num_2dec(value: float | None) -> str:
+    """
+    Formatea con exactamente 2 decimales (para precio unitario y medición de partidas).
+    """
+    if value is None:
+        return ""
+    return f"{value:.2f}".replace(",", ".")
 
 def _shorten_code_unique(code: str,
                          used: dict[str, str]) -> str:
@@ -382,17 +391,34 @@ def _strip_rtf_artifacts(txt: str) -> str:
 # --------------------------------------------------------------------------- #
 # PASADA 2 – reescritura del BC3 (interposición de CD# bajo supercapítulo)    #
 # --------------------------------------------------------------------------- #
-def convert_to_material(src: Path, dst: Path) -> None:
+def convert_to_material(src: Path, dst: Path, **kwargs) -> None:
     """
     Normaliza el BC3 y **intercala CD# bajo el supercapítulo '##'**.
-    (Docstring original, sin cambios funcionales, solo añadidos prints
-    y corrección del orden clean_text → _ensure_d_trailing_backslash
-    en las ~D).
+
+    Cambios relevantes respecto a tu versión previa:
+      - Acepta kwargs (round_partidas, max_code_len, etc.) para no romper llamadas
+        desde GUI / pipeline.
+      - El redondeo de PRECIO UNITARIO y CANTIDAD de PARTIDAS solo se aplica si:
+            round_partidas == True   (pasado por código)
+        o bien, si no se pasa nada:
+            ROUND_PARTIDAS=true en el entorno.
     """
     if not src.exists():
         raise FileNotFoundError(src)
 
-    print("[BC3 DEBUG] convert_to_material() SRC=", src, "DST=", dst)
+    # --- Flag de redondeo: kwarg > ENV > False ------------------------------
+    round_partidas_kw = kwargs.get("round_partidas", None)
+    if round_partidas_kw is None:
+        env_val = os.getenv("ROUND_PARTIDAS", "false").strip().lower()
+        do_round = (env_val == "true")
+    else:
+        do_round = bool(round_partidas_kw)
+
+    print("[BC3 DEBUG] convert_to_material() SRC=", src, "DST=", dst, "round_partidas=", do_round)
+
+    # El resto de kwargs (max_code_len, fill_unit_ud, force_material, encoding…)
+    # los ignoramos aquí para mantener el comportamiento antiguo.
+    # Si en el futuro quieres usar max_code_len o encoding, lo cableamos.
 
     code_map, tipo_map, children_map, price_map, meas_pair_map = _collect_info(src)
     force_mat = _compute_force_material(tipo_map, children_map)
@@ -446,12 +472,9 @@ def convert_to_material(src: Path, dst: Path) -> None:
                     print("[BC3 DEBUG]  Detectado super_root:", super_root)
 
                 # aplicar truncado SOLO para el código de salida
-                if orig_code in code_map:
-                    code_out = code_map[orig_code]
-                else:
-                    code_out = orig_code
+                code_out = code_map.get(orig_code, orig_code)
                 parts[0] = code_out
-                code = code_out  # alias local para salida (por si lo necesitas)
+                code = code_out  # alias local por si lo necesitas
 
                 # Descompuestos originales (1/2/3) → material
                 if tipo in {"1", "2", "3"}:
@@ -465,6 +488,15 @@ def convert_to_material(src: Path, dst: Path) -> None:
                         parts[3] = price_map.get(orig_code, pres)
                     parts[5] = "3"
                     tipo = "3"
+
+                # --- REDONDEO PRECIO UNITARIO SOLO PARTIDAS ----------------
+                # Partida real: tipo 0 y sin '#'
+                if do_round and tipo == "0" and "#" not in orig_code:
+                    p_val = _to_float(pres)
+                    if p_val is not None:
+                        pres_rounded = f"{p_val:.2f}".replace(",", ".")
+                        parts[3] = pres_rounded
+                        pres = pres_rounded
 
                 # === UNIDAD para PARTIDAS y DESCOMPUESTOS ===
                 is_desc = (tipo == "3") or (orig_code in all_children) or (orig_code in force_mat)
@@ -514,6 +546,13 @@ def convert_to_material(src: Path, dst: Path) -> None:
                             meas = meas_pair_map.get((parent_code, child_code))
                             if (meas is not None) and (meas > 0):
                                 qty = _fmt_num(meas)
+
+                    # --- REDONDEO MEDICIÓN SOLO PARTIDAS -------------------
+                    # Aquí la "medición de la partida" es la qty con la que cuelga del padre
+                    if do_round and tipo_map.get(child_code) == "0":
+                        q_val = _to_float(qty)
+                        if q_val is not None:
+                            qty = f"{q_val:.2f}".replace(",", ".")
 
                     # Truncado de código de hijo si procede
                     child_code_out = code_map.get(child_code, child_code)
@@ -613,3 +652,5 @@ def convert_to_material(src: Path, dst: Path) -> None:
             line_cd = _ensure_d_trailing_backslash(line_cd)
             print("[BC3 DEBUG]   [fallback] ~D CD# final:", line_cd.rstrip("\n"))
             fout.write(line_cd)
+
+
