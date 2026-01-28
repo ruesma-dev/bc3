@@ -22,6 +22,14 @@ from domain.bc3.records import (
     DescomposicionRecord,
     MedicionesRecord,
 )
+
+from infrastructure.filesystem.bc_refcru_package_writer import (
+    RefCruRow,
+    write_refcru_config_package_xlsx,
+    make_refcru_row,
+)
+
+
 from infrastructure.products.catalog_loader import load_catalog
 
 MAX_CODE_LEN = 20
@@ -500,17 +508,26 @@ def _letters_suffix(n: int) -> str:
     return s
 
 
-def _collect_bc3_info(path: Path) -> Tuple[Dict[str, Concept], Dict[str, str], Dict[str, str], Dict[str, List[str]]]:
+def _collect_bc3_info(
+    path: Path,
+) -> Tuple[
+    Dict[str, Concept],
+    Dict[str, str],
+    Dict[str, List[str]],      # parents_of: child -> [parents...]
+    Dict[str, List[str]],      # children_of: parent -> [children...]
+]:
     """
     Devuelve:
       concepts: code -> Concept (desc corta, unidad, precio, tipo, long_desc)
       long_map: code -> primera ~T
-      parent_of: code -> parent_code (si aparece como hijo en ~D)
-      children_of: parent_code -> [child_codes]
+      parents_of: child_code -> lista de padres (puede haber varios si el child aparece en varias ~D)
+      children_of: parent_code -> lista de hijos (acumulada)
     """
     concepts: Dict[str, Concept] = {}
     long_map: Dict[str, str] = {}
-    parent_of: Dict[str, str] = {}
+
+    # OJO: un mismo child puede aparecer en varias partidas -> multi-parent
+    parents_of_set: Dict[str, set[str]] = {}
     children_of: Dict[str, List[str]] = {}
 
     with path.open("r", encoding="latin-1", errors="ignore") as fh:
@@ -528,56 +545,107 @@ def _collect_bc3_info(path: Path) -> Tuple[Dict[str, Concept], Dict[str, str], D
                     price_txt=price or "",
                     tipo=tipo or "",
                 )
+
             elif raw.startswith("~T|"):
                 _, rest = raw.split("|", 1)
                 code, txt = rest.rstrip("\n").split("|", 1)
                 if code not in long_map:
                     long_map[code] = txt
+
             elif raw.startswith("~D|"):
                 _, rest = raw.split("|", 1)
                 parent, child_part = rest.split("|", 1)
+
                 chunks = child_part.rstrip("|\n").split("\\")
-                children = []
+                children: List[str] = []
                 for i in range(0, len(chunks), 3):
                     ch = (chunks[i] if i < len(chunks) else "").strip()
-                    if ch:
-                        parent_of[ch] = parent
-                        children.append(ch)
+                    if not ch:
+                        continue
+                    parents_of_set.setdefault(ch, set()).add(parent)
+                    children.append(ch)
+
                 if children:
-                    children_of[parent] = children
+                    # acumular (no sobrescribir)
+                    children_of.setdefault(parent, [])
+                    children_of[parent].extend(children)
 
     # enganchar long_desc
     for c in concepts.values():
         if c.code in long_map:
             c.long_desc = long_map[c.code]
-    return concepts, long_map, parent_of, children_of
+
+    # convertir parents_of a listas ordenadas para determinismo
+    parents_of: Dict[str, List[str]] = {
+        ch: sorted(list(ps)) for ch, ps in parents_of_set.items()
+    }
+
+    return concepts, long_map, parents_of, children_of
 
 
-def _context_for(code: str, concepts: Dict[str, Concept], parent_of: Dict[str, str]) -> str:
+def _context_for(code: str, concepts: Dict[str, Concept], parents_of: Dict[str, List[str]]) -> str:
     """
-    Construye un contexto textual con cadena de padres (capítulos/partidas) y
-    descripciones cortas/largas para dar a Gemini.
+    Construye un contexto textual.
+    Si el código aparece en varias partidas/padres, incluye esa información para que el LLM
+    no se “case” con un único árbol erróneo.
     """
+    from collections import deque
+
     parts: List[str] = []
-    cur = code
-    chain = []
-    seen = set()
-    while cur in parent_of and cur not in seen:
-        seen.add(cur)
-        p = parent_of[cur]
-        chain.append(p)
-        cur = p
-    chain = list(reversed(chain))
     parts.append("Presupuesto de obra en España, elaborado en PRESTO.")
-    if chain:
-        parts.append("Contexto jerárquico (de mayor a menor):")
-        for idx, cc in enumerate(chain, 1):
-            c = concepts.get(cc)
+
+    # Padres directos (pueden ser varios)
+    direct_parents = parents_of.get(code, []) or []
+    if direct_parents:
+        parts.append(f"Padres directos detectados ({len(direct_parents)}):")
+        for p in direct_parents[:10]:
+            c = concepts.get(p)
             if not c:
+                parts.append(f"- [{p}] (sin ~C)")
                 continue
             short = clean_text(c.desc_short)
             longt = clean_text(c.long_desc or "")
-            parts.append(f"- [{cc}] {short}. {('Texto: ' + longt) if longt else ''}")
+            parts.append(f"- [{p}] {short}. {('Texto: ' + longt) if longt else ''}")
+
+        if len(direct_parents) > 10:
+            parts.append(f"(+{len(direct_parents) - 10} padres directos más…)")
+
+    # Detectar partidas (tipo 0) “más cercanas” por BFS hacia arriba
+    partidas: set[str] = set()
+    q = deque()
+    seen: set[str] = set()
+
+    for p in direct_parents:
+        q.append(p)
+
+    while q:
+        cur = q.popleft()
+        if cur in seen:
+            continue
+        seen.add(cur)
+
+        ccur = concepts.get(cur)
+        if ccur and (ccur.tipo or "").strip() == "0":
+            partidas.add(cur)
+            # no expandimos por encima de una partida (queremos la más cercana)
+            continue
+
+        for pp in parents_of.get(cur, []) or []:
+            if pp not in seen:
+                q.append(pp)
+
+    if partidas:
+        parts.append("Partidas (tipo 0) cercanas detectadas:")
+        for pk in sorted(partidas)[:20]:
+            cpk = concepts.get(pk)
+            if cpk:
+                parts.append(f"- [{pk}] {clean_text(cpk.desc_short)}")
+            else:
+                parts.append(f"- [{pk}] (sin ~C)")
+        if len(partidas) > 20:
+            parts.append(f"(+{len(partidas) - 20} partidas más…)")
+
+    # Descompuesto objetivo
     c0 = concepts.get(code)
     if c0:
         parts.append("Descompuesto a clasificar:")
@@ -585,7 +653,9 @@ def _context_for(code: str, concepts: Dict[str, Concept], parent_of: Dict[str, s
         parts.append(f"- Descripción corta: {clean_text(c0.desc_short)}")
         if c0.long_desc:
             parts.append(f"- Descripción larga: {clean_text(c0.long_desc)}")
+
     return "\n".join(p for p in parts if p)
+
 
 
 # --------------------------- few-shots / prompt ----------------------------- #
@@ -894,18 +964,24 @@ def _build_replacement_map(
 ) -> Tuple[Dict[str, str], List[Tuple[str, str, float, str]]]:
     """
     Calcula old_code -> new_code SOLO para descompuestos (T=3 o T original 1/2/3).
-    Devuelve:
-      - repl_map: dict old_code -> new_code
-      - rows: lista de (old_code, new_code, confidence, method)
+
+    ARREGLO CLAVE:
+      - Un old_code puede aparecer en VARIAS partidas (multi-parent).
+      - Debemos garantizar que el new_code elegido para ese old_code NO colisiona en NINGUNA
+        de las partidas donde aparece.
 
     Reglas:
-      - Si el código contiene '%', usar **% DESCUENTO#** (método='rule').
-      - AHORA: al LLM se le pasan TODOS los productos del catálogo como candidatos.
-      - La heurística solo se usa para:
-          * inferir tipo/grupo objetivo desde el contexto,
-          * elegir un fallback razonable si el LLM falla o da baja confianza.
-      - (Opcional) volcado de prompts a disco si PHASE2_PROMPT_DUMP_DIR está definido.
+      - Si el código original contiene '%', usar **% DESCUENTO#** (método='rule') con numeración global.
+      - Al LLM se le pasan TODOS los productos del catálogo como candidatos.
+      - Versionado:
+          * Solo se añade sufijo cuando hay colisión dentro de una partida (misma partida).
+          * Si un old_code aparece en varias partidas, su new_code debe ser válido (único) en todas ellas.
+      - Validación final:
+          * Comprueba que no hay códigos nuevos duplicados dentro de ninguna partida (considerando multi-partida).
+          * Si OK imprime OK; si no, lista detalle y lanza RuntimeError.
     """
+    from collections import defaultdict, deque
+
     if use_heuristics is None:
         use_heuristics = os.getenv("PHASE2_USE_HEURISTICS", "false").lower() == "true"
 
@@ -917,11 +993,9 @@ def _build_replacement_map(
 
     prompt_dump_path: Optional[Path] = None
     if raw_dump_dir:
-        # Quitar comillas y expandir ~ y variables de entorno
         cleaned = raw_dump_dir.strip().strip('"').strip("'")
         dump_dir = Path(os.path.expandvars(os.path.expanduser(cleaned)))
     else:
-        # Si no hay ENV, volcamos en <carpeta_del_bc3>/prompts
         dump_dir = bc3_path.with_suffix("").parent / "prompts"
 
     try:
@@ -935,8 +1009,8 @@ def _build_replacement_map(
     # Few-shots (ENV tiene prioridad)
     fewshots = _load_fewshots_from_env() or fewshots or DEFAULT_FEWSHOTS
 
-    catalog = load_catalog(catalog_path)  # [{"code":..., "desc":...}, ...]
-    concepts, _longs, parent_of, _children = _collect_bc3_info(bc3_path)
+    catalog = load_catalog(catalog_path)
+    concepts, _longs, parents_of, _children = _collect_bc3_info(bc3_path)
 
     # Rate limit para Gemini
     rpm = int(os.getenv("GEMINI_RPM", "10") or "10")
@@ -946,43 +1020,38 @@ def _build_replacement_map(
     batch_size = max(1, int(os.getenv("GEMINI_BATCH_SIZE", "10") or "10"))
     min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or 0.0)
 
-    assigned: Dict[str, int] = {}
-    used: set[str] = set()
-    discount_counter = 0  # contador para % DESCUENTO
-
-    def unique_assign(base: str) -> str:
+    # -------------------- helper: partidas cercanas (multi-parent) --------------------
+    def _closest_partidas_for(code: str) -> set[str]:
         """
-        Garantiza unicidad y longitud máxima 20.
-        - Para '% DESCUENTO' numera 1..N.
-        - Para el resto usa sufijos alfabéticos (a, b, c, ...).
+        Devuelve el conjunto de PARTIDAS (tipo '0') más cercanas en el grafo de padres.
+        Si no se encuentra ninguna, devuelve {'__ROOT__'}.
         """
-        nonlocal discount_counter
-        if base.startswith("% DESCUENTO"):
-            discount_counter += 1
-            code = f"% DESCUENTO{discount_counter}"
-            return code[:MAX_CODE_LEN]
+        direct = parents_of.get(code, []) or []
+        if not direct:
+            return {"__ROOT__"}
 
-        if base not in assigned:
-            assigned[base] = 0
-            code = base[:MAX_CODE_LEN]
-        else:
-            assigned[base] += 1
-            suf = _letters_suffix(assigned[base])
-            code = _safe_with_suffix(base, suf)
+        partidas: set[str] = set()
+        q = deque(direct)
+        seen: set[str] = set()
 
-        n = 0
-        c0 = code
-        while code in used:
-            n += 1
-            suf = _letters_suffix(n)
-            code = _safe_with_suffix(c0, suf)
-        used.add(code)
-        return code
+        while q:
+            cur = q.popleft()
+            if cur in seen:
+                continue
+            seen.add(cur)
 
-    repl: Dict[str, str] = {}
-    rows: List[Tuple[str, str, float, str]] = []
+            ccur = concepts.get(cur)
+            if ccur and (ccur.tipo or "").strip() == "0":
+                partidas.add(cur)
+                continue  # no subir más desde aquí
 
-    # Recolectamos descompuestos (tipos 1/2/3, sin '#')
+            for pp in parents_of.get(cur, []) or []:
+                if pp not in seen:
+                    q.append(pp)
+
+        return partidas or {"__ROOT__"}
+
+    # -------------------- targets únicos (códigos descompuestos) --------------------
     targets: List[str] = []
     for code, c in concepts.items():
         if "#" in code:
@@ -990,6 +1059,21 @@ def _build_replacement_map(
         if c.tipo not in {"1", "2", "3"}:
             continue
         targets.append(code)
+
+    # -------------------- mapa old_code -> set(partidas) (multi-partida) --------------------
+    partidas_by_old: Dict[str, set[str]] = {}
+    olds_by_partida: Dict[str, List[str]] = defaultdict(list)
+
+    for oldc in targets:
+        pks = _closest_partidas_for(oldc)
+        partidas_by_old[oldc] = pks
+        for pk in pks:
+            olds_by_partida[pk].append(oldc)
+
+    # -------------------- FASE 1: elegir base (sin versionar) --------------------
+    base_choice: Dict[str, str] = {}
+    conf_choice: Dict[str, float] = {}
+    method_choice: Dict[str, str] = {}
 
     idx = 0
     while idx < len(targets):
@@ -1001,26 +1085,23 @@ def _build_replacement_map(
         for code in group:
             c = concepts[code]
 
-            # Regla fija para descuentos con '%'
+            # Regla fija para descuentos por '%' en el CÓDIGO ORIGINAL
             if "%" in code:
-                newc = unique_assign("% DESCUENTO")
-                repl[code] = newc
-                rows.append((code, newc, 1.0, "rule"))
+                base_choice[code] = "% DESCUENTO"
+                conf_choice[code] = 1.0
+                method_choice[code] = "rule"
                 continue
 
-            # Contexto base (incluye padres con desc corta/larga vía _context_for)
-            ctx = _context_for(code, concepts, parent_of)
+            ctx = _context_for(code, concepts, parents_of)
 
-            # Señales desde el contexto (tipo y grupo objetivo) SIN filtrar candidatos
             sig = _extract_signals_from_context(ctx, c, hints)
             tipo_obj = sig["tipo_sugerido"]
             grupo_obj = sig["grupo_sugerido"]
             tipo_obj_map[code] = tipo_obj
 
-            # Candidatos para el LLM: TODO el catálogo completo
             top_candidates = catalog
 
-            # Usamos la heurística SOLO para escoger un buen fallback (no para limitar el set)
+            # fallback por heurística (sin limitar set del LLM)
             k = int(os.getenv("PREFILTER_TOPK", str(topk)) or topk)
             heur_top, _ = _prefilter_candidates(
                 concept=c,
@@ -1030,14 +1111,9 @@ def _build_replacement_map(
                 hints=hints,
                 use_heuristics=bool(use_heuristics),
             )
-            if heur_top:
-                fallback_code = heur_top[0]["code"]
-            else:
-                # fallback extremo: primer producto del catálogo
-                fallback_code = catalog[0]["code"]
+            fallback_code = heur_top[0]["code"] if heur_top else catalog[0]["code"]
             fallbacks[code] = fallback_code
 
-            # Construimos el super-prompt con TODO el catálogo
             super_ctx = _compose_super_prompt(
                 context=ctx,
                 candidates=top_candidates,
@@ -1047,7 +1123,6 @@ def _build_replacement_map(
                 familias_hints=hints.familias,
             )
 
-            # Volcado opcional del prompt a disco para inspección
             if prompt_dump_path is not None:
                 safe_code = re.sub(r"[^A-Za-z0-9_.-]+", "_", code)
                 out_file = prompt_dump_path / f"{safe_code}.txt"
@@ -1057,13 +1132,14 @@ def _build_replacement_map(
                 except Exception as e:
                     print(f"[PHASE2 WARN] No se pudo escribir prompt {out_file}: {e}")
 
-            group_payload.append({
-                "id": code,
-                "context": super_ctx,
-                "candidates": [{"code": cc["code"], "desc": cc["desc"]} for cc in top_candidates],
-            })
+            group_payload.append(
+                {
+                    "id": code,
+                    "context": super_ctx,
+                    "candidates": [{"code": cc["code"], "desc": cc["desc"]} for cc in top_candidates],
+                }
+            )
 
-        # Si todo el grupo eran descuentos, saltamos a siguiente bloque
         if not group_payload:
             idx += len(group)
             continue
@@ -1075,21 +1151,17 @@ def _build_replacement_map(
 
                 for item in group_payload:
                     code = item["id"]
-                    if code in repl:
-                        continue
-
                     r = by_id.get(code) or {}
                     best = (r.get("best_code") or "").strip()
                     conf = float(r.get("confidence", 0.0))
 
-                    # Validación de tipo: si el LLM viola el tipo objetivo, forzamos fallback
                     tipo_obj = tipo_obj_map.get(code)
                     if best:
                         parts = _parse_catalog_desc(
                             next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
                         )
                         if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
-                            best = ""  # fuerza fallback
+                            best = ""
 
                     if not best or conf < min_conf:
                         best = fallbacks[code]
@@ -1099,28 +1171,24 @@ def _build_replacement_map(
                         method = "llm"
                         conf_used = conf
 
-                    newc = unique_assign(best)
-                    repl[code] = newc
-                    rows.append((code, newc, float(conf_used), method))
+                    base_choice[code] = (best or "").strip() or "SIN_CODIGO"
+                    conf_choice[code] = float(conf_used)
+                    method_choice[code] = method
 
             else:
                 for item in group_payload:
                     code = item["id"]
-                    if code in repl:
-                        continue
-
                     llm = choose_best_code_with_llm(item["context"], item["candidates"], limiter=limiter)
                     best = (llm.get("best_code") or "").strip()
                     conf = float(llm.get("confidence", 0.0))
 
-                    # Validación de tipo tras LLM
                     tipo_obj = tipo_obj_map.get(code)
                     if best:
                         parts = _parse_catalog_desc(
                             next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
                         )
                         if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
-                            best = ""  # fuerza fallback
+                            best = ""
 
                     if not best or conf < min_conf:
                         best = fallbacks[code]
@@ -1130,27 +1198,149 @@ def _build_replacement_map(
                         method = "llm"
                         conf_used = conf
 
-                    newc = unique_assign(best)
-                    repl[code] = newc
-                    rows.append((code, newc, float(conf_used), method))
+                    base_choice[code] = (best or "").strip() or "SIN_CODIGO"
+                    conf_choice[code] = float(conf_used)
+                    method_choice[code] = method
 
         except Exception:
-            # Fallback masivo si hay error con el LLM (timeout, etc.)
             for item in group_payload:
                 code = item["id"]
-                if code in repl:
-                    continue
-                best = fallbacks[code]
-                method = "heuristic+error" if use_heuristics else "simple+error"
-                newc = unique_assign(best)
-                repl[code] = newc
-                rows.append((code, newc, 0.5 if use_heuristics else 0.4, method))
+                best = (fallbacks.get(code) or (catalog[0]["code"] if catalog else "SIN_CODIGO")).strip() or "SIN_CODIGO"
+                base_choice[code] = best
+                conf_choice[code] = 0.5 if use_heuristics else 0.4
+                method_choice[code] = "heuristic+error" if use_heuristics else "simple+error"
 
         idx += len(group)
 
-    return repl, rows
+    # -------------------- FASE 2: versionado consistente multi-partida --------------------
+    def _make_code(base: str, k: int) -> str:
+        if k <= 0:
+            return base[:MAX_CODE_LEN]
+        suf = _letters_suffix(k)  # 1->a, 2->b...
+        return _safe_with_suffix(base, suf)[:MAX_CODE_LEN]
 
+    # 2.1) asignar % DESCUENTO# (por old_code, numeración global estable)
+    repl: Dict[str, str] = {}
+    discount_counter = 0
+    for oldc in targets:
+        if base_choice.get(oldc) == "% DESCUENTO":
+            discount_counter += 1
+            repl[oldc] = f"% DESCUENTO{discount_counter}"[:MAX_CODE_LEN]
 
+    # 2.2) construir “colores” (sufijos) por base para evitar colisiones
+    olds_by_base: Dict[str, List[str]] = defaultdict(list)
+    for oldc in targets:
+        b = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
+        if b == "% DESCUENTO":
+            continue
+        olds_by_base[b].append(oldc)
+
+    suffix_idx: Dict[str, int] = {oldc: 0 for oldc in targets if base_choice.get(oldc) != "% DESCUENTO"}
+
+    for base, olds in olds_by_base.items():
+        # construir adyacencias: edge si coexisten en alguna partida
+        adj: Dict[str, set[str]] = {o: set() for o in olds}
+
+        # pk -> olds con ese base en esa pk
+        by_pk: Dict[str, List[str]] = defaultdict(list)
+        for o in olds:
+            for pk in partidas_by_old.get(o, {"__ROOT__"}):
+                by_pk[pk].append(o)
+
+        for pk, lst in by_pk.items():
+            if len(lst) <= 1:
+                continue
+            # clique entre todos los que coexisten
+            for i in range(len(lst)):
+                for j in range(i + 1, len(lst)):
+                    a, b2 = lst[i], lst[j]
+                    adj[a].add(b2)
+                    adj[b2].add(a)
+
+        # greedy coloring (0,1,2...)
+        order = sorted(olds, key=lambda o: (len(adj[o]), o), reverse=True)
+        colors: Dict[str, int] = {}
+
+        for o in order:
+            used_colors = {colors[n] for n in adj[o] if n in colors}
+            ccol = 0
+            while ccol in used_colors:
+                ccol += 1
+            colors[o] = ccol
+
+        for o, ccol in colors.items():
+            suffix_idx[o] = max(suffix_idx.get(o, 0), ccol)
+
+    # 2.3) construir códigos iniciales
+    for oldc in targets:
+        if oldc in repl:
+            continue
+        base = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
+        repl[oldc] = _make_code(base, suffix_idx.get(oldc, 0))
+
+    # 2.4) “bump” defensivo: si aún hay colisiones por truncado/raros, subir sufijo del peor conf.
+    def _find_dup_cases() -> List[Tuple[str, str, List[str]]]:
+        seen_by_partida: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        for oldc, newc in repl.items():
+            for pk in partidas_by_old.get(oldc, {"__ROOT__"}):
+                seen_by_partida[pk][newc].append(oldc)
+
+        dup: List[Tuple[str, str, List[str]]] = []
+        for pk, m in seen_by_partida.items():
+            for newc, olds in m.items():
+                if len(olds) > 1:
+                    dup.append((pk, newc, olds))
+        return dup
+
+    max_bumps = 5000
+    bumps = 0
+    while True:
+        dup_cases = _find_dup_cases()
+        if not dup_cases:
+            break
+
+        if bumps >= max_bumps:
+            # dejamos que la validación final imprima detalle y reviente
+            break
+
+        # elegimos un caso y “bump” del de menor confianza (más razonable mover)
+        pk, newc, olds = dup_cases[0]
+        bump_old = min(olds, key=lambda o: conf_choice.get(o, 0.0))
+
+        if base_choice.get(bump_old) == "% DESCUENTO":
+            # no debería pasar (ya son únicos), pero por seguridad:
+            bumps += 1
+            continue
+
+        base = (base_choice.get(bump_old) or "").strip() or "SIN_CODIGO"
+        suffix_idx[bump_old] = int(suffix_idx.get(bump_old, 0)) + 1
+        repl[bump_old] = _make_code(base, suffix_idx[bump_old])
+        bumps += 1
+
+    # -------------------- rows (estable) --------------------
+    rows: List[Tuple[str, str, float, str]] = []
+    for oldc in targets:
+        if oldc not in repl:
+            continue
+        rows.append((oldc, repl[oldc], float(conf_choice.get(oldc, 0.0)), str(method_choice.get(oldc, ""))))
+
+    # -------------------- VALIDACIÓN FINAL (multi-partida real) --------------------
+    dup_cases = _find_dup_cases()
+    if not dup_cases:
+        print("[PHASE2 OK] Validación de unicidad por partida: sin duplicados de código nuevo.")
+        return repl, rows
+
+    print(
+        f"[PHASE2 ERROR] Duplicados detectados: código nuevo repetido dentro de una misma partida "
+        f"(casos={len(dup_cases)}). Detalle:"
+    )
+    for pk, newc, olds in dup_cases[:500]:
+        print(f"  - Partida {pk}: '{newc}' repetido {len(olds)} veces | old_codes: {', '.join(olds)}")
+
+    raise RuntimeError(
+        f"PHASE2: Duplicados de new_code dentro de la misma partida (casos={len(dup_cases)}). "
+        f"Revisa asignación/versionado."
+    )
 
 # --------------------------- reescritura BC3 -------------------------------- #
 def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> None:
@@ -1229,18 +1419,41 @@ def run_phase2(
     """
     Fase 2: clasifica descompuestos contra catálogo y sustituye códigos.
 
-    Parámetros:
-      - bc3_in / input_bc3: BC3 (salida de la fase 1, *_limpio.bc3)
-      - catalog_xlsx / catalog_path: Excel con catálogo (2 columnas)
-      - bc3_out / output_bc3: salida; si None => <input>_clasificado.bc3
-    Opcionales:
-      - use_heuristics: bool (o ENV PHASE2_USE_HEURISTICS=true)
-      - fewshots: lista de ejemplos (o ENV PHASE2_FEWSHOTS_PATH)
-      - hints_tree_xlsx: ruta al Excel con Tipo/Grupo/Familia (o ENV PHASE2_HINTS_XLSX)
-      - progress_cb / on_progress / progress_callback / callback / logger
-        (callback de progreso: recibe strings con el avance)
+    NUEVO:
+      - refcru_template_xlsx: plantilla exportada desde BC (con asignación XML)
+      - refcru_out: ruta salida del excel para paquete REFCRU
+      - emit_refcru_xlsx: bool (default True) para generar el excel importable en BC
+
+    Defaults (en EXE):
+      MiApp/
+        MiApp.exe
+        data/
+          catalog/catalog.xlsx
+          templates/REFCRU_template.xlsx
     """
-    # ---- alias compat GUI ---------------------------------------------------
+    import sys
+
+    # ------------------ helpers para rutas (EXE / dev) ------------------ #
+    def _app_dir() -> Path:
+        # En exe (PyInstaller): sys.executable apunta al exe real
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        # En dev: script lanzador
+        return Path(sys.argv[0]).resolve().parent
+
+    def _first_existing(candidates: list[Path]) -> Optional[Path]:
+        for p in candidates:
+            try:
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+        return None
+
+    base_dir = _app_dir()
+    data_dir = base_dir / "data"
+
+    # ------------------ alias compat GUI ------------------ #
     if bc3_in is None:
         bc3_in = kwargs.pop("input_bc3", None)
     if catalog_xlsx is None:
@@ -1248,80 +1461,120 @@ def run_phase2(
     if bc3_out is None:
         bc3_out = kwargs.pop("output_bc3", None)
 
+    # ------------------ defaults catálogo (si GUI no lo pasó) ------------------ #
+    if catalog_xlsx is None:
+        env_cat = os.getenv("PHASE2_CATALOG_XLSX", "").strip()
+        if env_cat:
+            catalog_xlsx = env_cat
+        else:
+            cand = [
+                data_dir / "catalog" / "catalog.xlsx",
+                data_dir / "catalog" / "catalogo.xlsx",
+                data_dir / "catalog" / "catalogo_productos.xlsx",
+                data_dir / "catalog" / "catalogo_productos.xlsm",
+                base_dir / "catalog.xlsx",
+            ]
+            found = _first_existing(cand)
+            if found:
+                catalog_xlsx = found
+
     if bc3_in is None or catalog_xlsx is None:
         raise ValueError("run_phase2: faltan 'bc3_in' y/o 'catalog_xlsx'.")
 
     bc3_in = Path(bc3_in)
     catalog_xlsx = Path(catalog_xlsx)
+
     if bc3_out is None:
         bc3_out = bc3_in.with_name(bc3_in.stem + "_clasificado.bc3")
     else:
         bc3_out = Path(bc3_out)
 
-    # ---- extras opcionales --------------------------------------------------
+    # ------------------ extras IA/hints ------------------ #
     use_heuristics = kwargs.pop("use_heuristics", None)
     fewshots = kwargs.pop("fewshots", None)
     hints_tree_xlsx = kwargs.pop("hints_tree_xlsx", None)
 
-    # ---- callback progreso --------------------------------------------------
+    # ------------------ REFCRU template + salida ------------------ #
+    emit_refcru_xlsx = bool(kwargs.pop("emit_refcru_xlsx", True))
+    refcru_template_xlsx = kwargs.pop("refcru_template_xlsx", None) or kwargs.pop("refcru_template", None)
+    refcru_out = kwargs.pop("refcru_out", None)
+
+    if refcru_template_xlsx is None:
+        env_tpl = os.getenv("PHASE2_REFCRU_TEMPLATE_XLSX", "").strip()
+        if env_tpl:
+            refcru_template_xlsx = env_tpl
+        else:
+            cand_tpl = [
+                data_dir / "templates" / "REFCRU_template.xlsx",
+                data_dir / "templates" / "REFCRU.xlsx",
+                base_dir / "templates" / "REFCRU_template.xlsx",
+                base_dir / "templates" / "REFCRU.xlsx",
+            ]
+            found_tpl = _first_existing(cand_tpl)
+            if found_tpl:
+                refcru_template_xlsx = found_tpl
+
+    if refcru_template_xlsx is not None:
+        refcru_template_xlsx = Path(refcru_template_xlsx)
+
+    if refcru_out is None:
+        refcru_out = bc3_out.with_name(bc3_out.stem + "_REFCRU.xlsx")
+    else:
+        refcru_out = Path(refcru_out)
+
+    # ------------------ callback progreso (GUI) ------------------ #
     progress_cb = None
     for k in ("progress_cb", "on_progress", "progress_callback", "callback", "logger"):
         if k in kwargs and kwargs[k] is not None:
             progress_cb = kwargs[k]
             break
 
-    # ---- conteo estimado de descompuestos ----------------------------------
-    if progress_cb:
-        try:
-            total = 0
-            with bc3_in.open("r", encoding="latin-1", errors="ignore") as fh:
-                for raw in fh:
-                    if raw.startswith("~C|"):
-                        parts = raw.rstrip("\n").split("|")
-                        if len(parts) >= 7 and parts[6] in {"1", "2", "3"}:
-                            total += 1
-            progress_cb(f"Detectados {total} descompuestos en el BC3.")
-        except Exception:
-            pass
-
-    # ---- construir mapeo + lista (old,new,conf,method) ---------------------
+    # ------------------ ejecutar IA -> repl_map ------------------ #
     repl_map, rows = _build_replacement_map(
-        bc3_in, catalog_xlsx,
+        bc3_in,
+        catalog_xlsx,
         use_heuristics=use_heuristics,
         fewshots=fewshots,
         hints_tree_xlsx=hints_tree_xlsx,
     )
 
-    # Progreso por cada reemplazo (post-cálculo)
-    if progress_cb and rows:
-        total = len(rows)
-        for i, (oldc, newc, conf, method) in enumerate(rows, 1):
-            progress_cb(f"{i}/{total} | {oldc} → {newc} ({conf:.2f}, {method})")
-
-    # ---- reescritura y post-procesado --------------------------------------
+    # ------------------ reescritura BC3 ------------------ #
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
-    # Asegurar unidad 'ud' en descompuestos tipo 3 sin unidad (y sin '#')
-    # _ensure_ud_for_materials(bc3_out)
-    # _ensure_ud_for_concepts(bc3_out)
-    # Unificación de unidades (M2, M.2, M2. -> M2; U, Ud., UD. -> UD; etc.)
-    # _unify_units_in_file(bc3_out)
-    # Limpiar colas de tuberías y backslashes finales en ~D
     _cleanup_trailing_pipes_file(bc3_out)
 
     try:
         _fix_d_trailing_backslashes(bc3_out)
     except Exception:
         pass
-    #
-    # ---- CSV con mapping ----------------------------------------------------
+
     map_csv = bc3_out.with_name(bc3_out.stem + "_map.csv")
     _write_mapping_csv(rows, map_csv)
-    #
+
     try:
         _final_trim_trailing_pipes(bc3_out)
     except Exception:
-    #     si algo va mal, no bloqueamos el flujo principal
         pass
 
+    # ------------------ generar REFCRU usando plantilla con XML mapping ------------------ #
+    if emit_refcru_xlsx:
+        if refcru_template_xlsx is None or not refcru_template_xlsx.exists():
+            print(f"[PHASE2 WARN] No se encontró plantilla REFCRU (XML mapping). No se genera XLSX REFCRU.")
+            if progress_cb:
+                progress_cb("Aviso: no se encontró plantilla REFCRU. Selecciónala con 'Buscar...'")
+        else:
+            ref_rows: List[RefCruRow] = []
+            # Orden estable: rows
+            for oldc, newc, _conf, _method in rows:
+                ref_rows.append(make_refcru_row(item_no=newc, reference_no=oldc))
+
+            write_refcru_config_package_xlsx(
+                template_xlsx=refcru_template_xlsx,
+                output_xlsx=refcru_out,
+                rows=ref_rows,
+            )
+
+            print(f"[PHASE2 OK] Generado REFCRU importable en BC: {refcru_out}")
+            if progress_cb:
+                progress_cb(f"OK: generado REFCRU importable en BC: {refcru_out.name}")
+
     return bc3_out
-#
