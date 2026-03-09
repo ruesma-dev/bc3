@@ -168,6 +168,10 @@ cython_debug/
 # PyCharm
 .idea/
 .output/
+.output/debug_ocr_io/
+.output/phase2_ocr_io/
+
+
 
 # Ruff stuff:
 .ruff_cache/

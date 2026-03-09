@@ -8,15 +8,16 @@ import os
 import re
 import json
 import csv
+import sys
+import subprocess
+from collections import deque
+
+from datetime import datetime, timezone
+import uuid
 
 import pandas as pd
 
 from utils.text_sanitize import clean_text
-from infrastructure.ai.gemini_client import (
-    RateLimiter,
-    choose_best_code_with_llm,
-    choose_best_code_batch_with_llm,
-)
 from domain.bc3.records import (
     ConceptRecord,
     DescomposicionRecord,
@@ -29,24 +30,16 @@ from infrastructure.filesystem.bc_refcru_package_writer import (
     make_refcru_row,
 )
 
-
-from infrastructure.products.catalog_loader import load_catalog
-
 MAX_CODE_LEN = 20
 NUM_RE = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
 _PIPE_TAIL_RE = re.compile(r"\|+\s*$")
 
+
 def _final_trim_trailing_pipes(file_path: Path) -> None:
     """
     Limpia el fichero resultante colapsando '|||' finales en un único '|'
     SOLO al final de cada línea. No toca los '|' internos.
-
-    Reglas:
-      - Para líneas que empiezan por '~' (registros BC3), si terminan con
-        uno o más '|' (posibles espacios después), se colapsa a un único '|'.
-      - No añade '|' si no lo había.
-      - Mantiene saltos de línea.
     """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_clean")
     pat = re.compile(r"\|+\s*$")
@@ -56,23 +49,21 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
         for raw in fin:
             if raw.startswith("~"):
                 s = raw.rstrip("\n")
-                s = pat.sub("|", s)  # '||||  ' -> '|'
+                s = pat.sub("|", s)
                 fout.write(s + "\n")
             else:
-                # líneas no BC3: solo asegurar salto de línea
                 if not raw.endswith("\n"):
                     raw = raw + "\n"
                 fout.write(raw)
 
-    # Reemplaza el original por el limpio
     tmp.replace(file_path)
+
 
 def _fix_d_trailing_backslashes(file_path: Path) -> None:
     """
     Normaliza las líneas ~D para que terminen en '\\|':
       - si no hay barra antes del último '|', añade UNA '\'
       - si hay varias barras, las reduce a UNA sola
-    No toca otras líneas.
     """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_dfix")
 
@@ -84,19 +75,12 @@ def _fix_d_trailing_backslashes(file_path: Path) -> None:
                 s = raw.rstrip("\n")
 
                 if s.endswith("|"):
-                    before = s
-                    # Quitamos el '|' final, normalizamos las '\' finales y volvemos a añadir '|'
-                    core = s[:-1]          # todo menos el último '|'
-                    core = core.rstrip("\\") + "\\"   # deja EXACTAMENTE una '\'
-                    s = core + "|"         # añade el pipe final
-
-                    # (opcional) trazas de debug:
-                    # if s != before:
-                    #     print("[PHASE2 DEBUG] Fix ~D '\\' final:\n  IN :", before, "\n  OUT:", s)
+                    core = s[:-1]
+                    core = core.rstrip("\\") + "\\"
+                    s = core + "|"
 
                 fout.write(s + "\n")
             else:
-                # Resto de líneas: solo aseguramos salto de línea
                 if not raw.endswith("\n"):
                     raw = raw + "\n"
                 fout.write(raw)
@@ -108,14 +92,11 @@ def _cleanup_trailing_pipes_file(path: Path) -> None:
     """
     Reescribe el archivo asegurando que las líneas BC3 terminen con
     una única tubería '|' (sin acumular '|||' al final).
-    No toca el contenido interno ni las barras invertidas de ~D.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
     with path.open("r", encoding="latin-1", errors="ignore") as fin, \
          tmp.open("w", encoding="latin-1", errors="ignore") as fout:
         for line in fin:
-            # Mantener exactamente una tubería final
-            # (respetando cualquier barra invertida previa)
             if line.rstrip("\n").endswith("|"):
                 clean = _PIPE_TAIL_RE.sub("|", line.rstrip("\n")) + "\n"
                 fout.write(clean)
@@ -124,12 +105,12 @@ def _cleanup_trailing_pipes_file(path: Path) -> None:
     path.unlink()
     tmp.rename(path)
 
+
 def _ensure_ud_for_concepts(file_path: Path) -> None:
     """
     Después de la asignación por IA, asegura unidad 'ud' cuando falte en:
       - Descompuestos (tipo '3') y
       - Partidas (tipo '0')
-    SIEMPRE que el código NO contenga '#'. Los capítulos (con '#') se ignoran.
     """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_units")
     with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
@@ -140,17 +121,16 @@ def _ensure_ud_for_concepts(file_path: Path) -> None:
                 fout.write(raw)
                 continue
 
-            head, rest = raw.split("|", 1)  # "~C", resto
+            head, rest = raw.split("|", 1)
             parts = rest.rstrip("\n")
             fields = parts.split("|")
             while len(fields) < 6:
-                fields.append("")  # code, unidad, desc, price, date, tipo
+                fields.append("")
 
             code = fields[0]
             unidad = fields[1]
             tipo = fields[5]
 
-            # Afecta a tipo 0 (partidas) y 3 (descompuestos), sin '#', y unidad vacía
             if tipo.strip() in {"0", "3"} and "#" not in code and (unidad.strip() == ""):
                 fields[1] = "ud"
 
@@ -159,38 +139,469 @@ def _ensure_ud_for_concepts(file_path: Path) -> None:
 
     tmp.replace(file_path)
 
+
 def _normalize_unit_key(u: str) -> str:
-    """
-    Normaliza la unidad para buscar en el diccionario:
-      - mayúsculas
-      - quita espacios y puntos
-      - sustituye superíndices ²/³ por 2/3
-      - normaliza variantes obvias (M^2 -> M2, M^3 -> M3, M· -> M) en la clave
-    """
     if not u:
         return ""
     s = u.upper().replace(" ", "").replace(".", "")
     s = s.replace("²", "2").replace("³", "3")
     s = s.replace("^2", "2").replace("^3", "3")
-    s = s.replace("·", "")  # la clave de lookup no distingue el punto medio
+    s = s.replace("·", "")
     return s
 
 
-# Mapa de destino CANÓNICO -> variantes esperables
-# (añade aquí las que quieras; las desconocidas se dejan tal cual)
+# ---------------------------- OCR_SERVICE helpers ----------------------------
+
+def _module_rel_candidates(module: str) -> list[Path]:
+    parts = [p for p in (module or "").split(".") if p]
+    mp = Path(*parts)
+    return [
+        mp.with_suffix(".py"),
+        mp / "__init__.py",
+        mp / "__main__.py",
+    ]
+
+
+def _root_has_module(root: Path, module: str) -> bool:
+    if not root:
+        return False
+    for base in (root, root / "src"):
+        for rel in _module_rel_candidates(module):
+            try:
+                if (base / rel).exists():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _guess_repo_root_from_file() -> Optional[Path]:
+    """
+    Intenta inferir el root del repo actual (bc3) subiendo hasta encontrar 'application/'.
+    """
+    try:
+        here = Path(__file__).resolve()
+        for p in [here.parent] + list(here.parents):
+            if (p / "application").exists():
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_ocr_service_root(module: Optional[str] = None) -> Optional[Path]:
+    """
+    Carpeta raíz del repo ocr_service para ejecutar el módulo -m con imports correctos.
+    """
+    module = module or (os.getenv("OCR_SERVICE_MODULE") or "interface_adapters.cli.bc3_classify_stdin").strip()
+
+    env_p = (os.getenv("OCR_SERVICE_ROOT") or os.getenv("OCR_SERVICE_WORKDIR") or "").strip()
+    if env_p:
+        pp = Path(os.path.expandvars(os.path.expanduser(env_p.strip('"').strip("'"))))
+        if pp.exists():
+            if _root_has_module(pp, module):
+                return pp
+            return pp
+
+    bc3_root = _guess_repo_root_from_file()
+    if bc3_root:
+        cand = bc3_root / "ocr_service"
+        if cand.exists() and _root_has_module(cand, module):
+            return cand
+
+        sib = bc3_root.parent / "ocr_service"
+        if sib.exists() and _root_has_module(sib, module):
+            return sib
+
+        try:
+            parent = bc3_root.parent
+            count = 0
+            for d in parent.iterdir():
+                if not d.is_dir():
+                    continue
+                count += 1
+                if count > 60:
+                    break
+
+                if _root_has_module(d, module):
+                    return d
+                dd = d / "ocr_service"
+                if dd.exists() and _root_has_module(dd, module):
+                    return dd
+        except Exception:
+            pass
+
+    return None
+
+
+def _resolve_ocr_service_python(ocr_root: Optional[Path] = None) -> str:
+    """
+    Devuelve el python.exe que ejecutará el ocr_service.
+
+    Orden:
+      1) ENV OCR_SERVICE_PYTHON / OCR_SERVICE_PY
+      2) Si hay ocr_root, intentar <ocr_root>/.venv/(Scripts|bin)/python
+      3) fallback: sys.executable
+    """
+    p = (os.getenv("OCR_SERVICE_PYTHON") or os.getenv("OCR_SERVICE_PY") or "").strip()
+    if p:
+        return p.strip('"').strip("'")
+
+    if ocr_root:
+        candidates = [
+            ocr_root / ".venv" / "Scripts" / "python.exe",
+            ocr_root / ".venv" / "bin" / "python",
+            ocr_root / "venv" / "Scripts" / "python.exe",
+            ocr_root / "venv" / "bin" / "python",
+        ]
+        for c in candidates:
+            try:
+                if c.exists():
+                    return str(c)
+            except Exception:
+                continue
+
+    return sys.executable
+
+
+def _debug_enabled() -> bool:
+    """
+    DEBUG ON por defecto (para tu fase de depuración).
+    Para desactivar:
+      PHASE2_DUMP_OCR_IO=0
+    """
+    v = os.getenv("PHASE2_DUMP_OCR_IO")
+    if v is None or v.strip() == "":
+        return True
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _debug_mode() -> str:
+    return (os.getenv("PHASE2_DUMP_OCR_MODE", "all").strip().lower() or "all")
+
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+
+
+def _safe_slug(s: str, max_len: int = 120) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
+    s = s.strip("._-")
+    return (s[:max_len] if s else "item")
+
+
+def _write_json(path: Path, obj: Any) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[PHASE2 WARN] No pude escribir JSON en {path}: {e}", file=sys.stderr)
+        try:
+            print(json.dumps(obj, ensure_ascii=False, indent=2), file=sys.stderr)
+        except Exception:
+            pass
+
+
+def _write_text(path: Path, txt: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(txt or "", encoding="utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[PHASE2 WARN] No pude escribir TXT en {path}: {e}", file=sys.stderr)
+        try:
+            print(txt or "", file=sys.stderr)
+        except Exception:
+            pass
+
+
+def _resolve_phase2_dump_dir(bc3_path: Path) -> Optional[Path]:
+    """
+    Reglas pedidas:
+      - Primero intenta PHASE2_DUMP_OCR_DIR si existe
+      - Si no: carpeta output del proyecto bc3
+      - Si no: output junto al bc3
+      - Si no: ruta del bc3
+      - Si no puede escribir: None (y entonces volcamos a consola)
+    """
+    if not _debug_enabled():
+        return None
+
+    base_env = (os.getenv("PHASE2_DUMP_OCR_DIR", "") or "").strip()
+    candidates: list[Path] = []
+
+    if base_env:
+        candidates.append(Path(os.path.expandvars(os.path.expanduser(base_env.strip('"').strip("'")))))
+
+    bc3_root = _guess_repo_root_from_file()
+    if bc3_root:
+        candidates.append(bc3_root / "output")
+
+    candidates.append(bc3_path.parent / "output")
+    candidates.append(bc3_path.parent)
+
+    run_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    for base_dir in candidates:
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            out = base_dir / "phase2_ocr_io" / f"{bc3_path.stem}_{run_tag}"
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+        except Exception:
+            continue
+
+    return None
+
+
+def _parse_json_from_mixed_output(stdout_text: str, stderr_text: str = "") -> Any:
+    s = (stdout_text or "").lstrip("\ufeff").strip()
+    if not s:
+        raise ValueError(f"stdout vacío (stderr: {stderr_text[:500]})")
+
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(s):
+        if ch not in "{[":
+            continue
+        try:
+            obj, _end = dec.raw_decode(s[i:])
+            return obj
+        except Exception:
+            continue
+
+    raise ValueError(
+        "No se pudo extraer JSON de stdout. "
+        f"STDOUT(head): {s[:500]}\nSTDERR(head): {(stderr_text or '')[:500]}"
+    )
+
+
+def _run_ocr_service_bc3_classify(
+    payload: Dict[str, Any],
+    *,
+    dump_dir: Optional[Path] = None,
+    dump_mode: str = "all",
+) -> Dict[str, Any]:
+    """
+    Llama al CLI del ocr_service por subprocess enviando payload por stdin.
+    Devuelve el envelope dict parseado.
+    """
+    module = (os.getenv("OCR_SERVICE_MODULE") or "interface_adapters.cli.bc3_classify_stdin").strip()
+    cwd = _resolve_ocr_service_root(module)
+    py = _resolve_ocr_service_python(cwd)
+    timeout_s = int((os.getenv("OCR_SERVICE_TIMEOUT_S") or "240").strip())
+
+    cmd = [py, "-m", module]
+
+    item_id = ""
+    try:
+        ds0 = (payload.get("descompuestos") or [])[0] or {}
+        item_id = str(ds0.get("id") or ds0.get("codigo_bc3") or "")
+    except Exception:
+        item_id = ""
+
+    trace_id = f"{_utc_stamp()}_{_safe_slug(item_id) if item_id else 'call'}_{uuid.uuid4().hex[:8]}"
+
+    # Si no hay dump_dir y debug está ON: avisamos (y luego volcamos a consola en caso extremo)
+    if _debug_enabled() and dump_dir is None:
+        print("[PHASE2 DEBUG] Dump ON pero no pude crear carpeta de dump. Fallback: consola.", file=sys.stderr)
+
+    if dump_dir and dump_mode in {"all"}:
+        _write_json(dump_dir / f"{trace_id}__request.json", payload)
+    elif _debug_enabled() and dump_dir is None and dump_mode in {"all"}:
+        print(f"[PHASE2 DEBUG] REQUEST trace_id={trace_id}\n{json.dumps(payload, ensure_ascii=False, indent=2)}", file=sys.stderr)
+
+    # Propagar flags de debug al ocr_service
+    env = os.environ.copy()
+    if _debug_enabled():
+        env.setdefault("PHASE2_DUMP_OCR_IO", "1")
+        env.setdefault("PHASE2_DUMP_OCR_MODE", dump_mode or "all")
+        # pasar base dir (no el subdir del trace) para que ocr_service cree su subcarpeta
+        if dump_dir:
+            env.setdefault("PHASE2_DUMP_OCR_DIR", str(dump_dir.parents[1] if len(dump_dir.parents) >= 2 else dump_dir.parent))
+
+    proc = subprocess.run(
+        cmd,
+        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        timeout=timeout_s,
+        env=env,
+    )
+
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+
+    if proc.returncode != 0:
+        if dump_dir and dump_mode in {"all", "errors"}:
+            _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
+            _write_text(dump_dir / f"{trace_id}__stdout.txt", stdout)
+            _write_json(
+                dump_dir / f"{trace_id}__error.json",
+                {
+                    "trace_id": trace_id,
+                    "cmd": cmd,
+                    "cwd": str(cwd) if cwd else None,
+                    "returncode": proc.returncode,
+                    "request": payload,
+                    "stderr": stderr,
+                    "stdout": stdout,
+                },
+            )
+        else:
+            print(f"[PHASE2 DEBUG] STDERR:\n{stderr}\nSTDOUT:\n{stdout}", file=sys.stderr)
+
+        raise RuntimeError(
+            "Fallo llamando a ocr_service.\n"
+            f"CMD: {' '.join(cmd)}\n"
+            f"CWD: {cwd}\n"
+            f"RC: {proc.returncode}\n"
+            f"STDERR:\n{stderr}\n"
+            f"STDOUT:\n{stdout}\n"
+            "Sugerencia: comprueba OCR_SERVICE_ROOT/OCR_SERVICE_PYTHON o que el módulo exista.\n"
+        )
+
+    envelope = _parse_json_from_mixed_output(stdout, stderr)
+    if not isinstance(envelope, dict):
+        if dump_dir and dump_mode in {"all", "errors"}:
+            _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
+            _write_text(dump_dir / f"{trace_id}__stdout.txt", stdout)
+            _write_json(
+                dump_dir / f"{trace_id}__bad_response.json",
+                {
+                    "trace_id": trace_id,
+                    "cmd": cmd,
+                    "cwd": str(cwd) if cwd else None,
+                    "returncode": proc.returncode,
+                    "request": payload,
+                    "stderr": stderr,
+                    "stdout": stdout,
+                    "parsed_type": str(type(envelope)),
+                },
+            )
+        raise ValueError(f"Respuesta no dict. type={type(envelope)} head={str(envelope)[:200]}")
+
+    if dump_dir and dump_mode in {"all"}:
+        _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
+        _write_json(dump_dir / f"{trace_id}__response.json", envelope)
+    elif _debug_enabled() and dump_dir is None and dump_mode in {"all"}:
+        print(f"[PHASE2 DEBUG] RESPONSE trace_id={trace_id}\n{json.dumps(envelope, ensure_ascii=False, indent=2)}", file=sys.stderr)
+
+    return envelope
+
+
+def _extract_best_code_from_envelope(envelope: Dict[str, Any]) -> tuple[str, float]:
+    """
+    Extrae (best_code, confidence) del envelope devuelto por ocr_service.
+
+    IMPORTANTE:
+      - ocr_service devuelve 'codigo_interno' (según tu prompt actual)
+      - confianza puede venir como 0..1 o como porcentaje 0..100 ('confianza_pct')
+    """
+    def _coerce_conf(x: Any) -> float:
+        if x is None:
+            return 0.0
+        try:
+            f = float(x)
+        except Exception:
+            return 0.0
+        if f < 0:
+            return 0.0
+        # si viene 0..100
+        if f > 1.0:
+            if f <= 100.0:
+                return f / 100.0
+            return min(1.0, f / 100.0)
+        return f
+
+    data = envelope.get("data", envelope)
+
+    # Si viene como lista directa
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict):
+            code = (
+                first.get("codigo_interno")
+                or first.get("codigo_producto")
+                or first.get("best_code")
+                or first.get("code")
+                or ""
+            )
+            conf = (
+                first.get("confidence")
+                or first.get("confianza")
+                or first.get("score")
+                or first.get("confianza_pct")
+                or first.get("confidence_pct")
+                or 0.0
+            )
+            return str(code).strip(), _coerce_conf(conf)
+
+    if isinstance(data, dict):
+        for key in ("clasificaciones", "resultados", "items", "outputs", "descompuestos"):
+            v = data.get(key)
+            if isinstance(v, list) and v:
+                first = v[0]
+                if isinstance(first, dict):
+                    code = (
+                        first.get("codigo_interno")
+                        or first.get("codigo_producto")
+                        or first.get("best_code")
+                        or first.get("code")
+                        or ""
+                    )
+                    conf = (
+                        first.get("confidence")
+                        or first.get("confianza")
+                        or first.get("score")
+                        or first.get("confianza_pct")
+                        or first.get("confidence_pct")
+                        or 0.0
+                    )
+                    return str(code).strip(), _coerce_conf(conf)
+
+        code = (
+            data.get("codigo_interno")
+            or data.get("codigo_producto")
+            or data.get("best_code")
+            or data.get("code")
+            or ""
+        )
+        if isinstance(code, str) and code.strip():
+            conf = (
+                data.get("confidence")
+                or data.get("confianza")
+                or data.get("score")
+                or data.get("confianza_pct")
+                or data.get("confidence_pct")
+                or 0.0
+            )
+            return code.strip(), _coerce_conf(conf)
+
+    raise ValueError(f"No pude extraer best_code de la respuesta. keys={list(envelope.keys())}")
+
+
+# --------------------------------------------------------------------------- #
+# Unificación de unidades (igual que lo tenías)
+# --------------------------------------------------------------------------- #
+
 _UNIT_VARIANTS: dict[str, set[str]] = {
     "%": {"%"},
     "CM": {"CM", "CENTIMETRO", "CENTÍMETRO"},
     "H": {"H", "HORA", "H."},
-    "HR": {"HR"},  # lo dejamos distinto de H si te interesa separarlo
+    "HR": {"HR"},
     "KG": {"KG", "K.G", "KGS", "KG.", "KILOGRAMO", "KILOS"},
     "L": {"L", "L.", "LITRO", "LITROS"},
-    "M": {"M", "M.", "METRO", "METROS", "M·"},  # metro “a secas”
+    "M": {"M", "M.", "METRO", "METROS", "M·"},
     "ML": {
         "ML", "M.L", "M L", "M-L", "METROLINEAL", "M LINEAL", "METROS LINEALES",
         "ML.", "M. L."
     },
-    "MI": {"MI", "M.I", "M I", "M. I."},  # si usas “metro interior” u otro significado
+    "MI": {"MI", "M.I", "M I", "M. I."},
     "M2": {
         "M2", "M2.", "M.2", "M 2", "M^2", "M²", "METROCUADRADO", "METROS CUADRADOS",
         "M.CUADRADO", "M. CUADRADO"
@@ -206,29 +617,18 @@ _UNIT_VARIANTS: dict[str, set[str]] = {
     "UD": {"UD", "UD.", "U", "U.", "UNIDAD", "UNIDADES", "UNID", "UNID."},
     "VIV": {"VIV", "VIVIENDA", "VIVIENDAS"},
     "PLANTAS": {"PLANTAS", "PLANTA", "PLANT", "PLANT."},
-    # Códigos “raros” que quieres respetar tal cual si aparecen:
     "LEGRAND": {"LEGRAND"},
 }
 
-
-# Prepara índice inverso: clave normalizada -> canon
 _UNIT_LOOKUP: dict[str, str] = {}
 for canon, vars_ in _UNIT_VARIANTS.items():
     for v in vars_:
         _UNIT_LOOKUP[_normalize_unit_key(v)] = canon
-# también mapeamos el propio canon a sí mismo
 for canon in _UNIT_VARIANTS.keys():
     _UNIT_LOOKUP[_normalize_unit_key(canon)] = canon
 
 
 def _unify_units_in_file(file_path: Path) -> None:
-    """
-    Reescribe las líneas ~C unificando la unidad:
-      - Si la unidad existe, intenta mapearla a un CANON (p.ej. M2).
-      - Solo actúa en partidas (tipo '0') y descompuestos (tipo '3').
-      - No toca capítulos (código con '#').
-      - Si la unidad está vacía, no hace nada aquí (eso ya lo cubre _ensure_ud_for_concepts).
-    """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_units_unify")
 
     with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
@@ -239,7 +639,7 @@ def _unify_units_in_file(file_path: Path) -> None:
                 fout.write(raw)
                 continue
 
-            head, rest = raw.split("|", 1)  # "~C", resto
+            head, rest = raw.split("|", 1)
             parts = rest.rstrip("\n")
             fields = parts.split("|")
             while len(fields) < 6:
@@ -249,12 +649,11 @@ def _unify_units_in_file(file_path: Path) -> None:
             unidad = fields[1]
             tipo = fields[5]
 
-            # Solo partidas (0) y descompuestos (3) sin '#'
             if tipo.strip() in {"0", "3"} and "#" not in code and unidad.strip():
                 key = _normalize_unit_key(unidad)
                 canon = _UNIT_LOOKUP.get(key)
                 if canon:
-                    fields[1] = canon  # unificamos
+                    fields[1] = canon
 
             line = f"{head}|{'|'.join(fields)}|\n"
             fout.write(line)
@@ -263,15 +662,6 @@ def _unify_units_in_file(file_path: Path) -> None:
 
 
 def _ensure_ud_for_materials(file_path: Path) -> None:
-    """
-    Después de la asignación por IA:
-    - Si una línea ~C| corresponde a un descompuesto (tipo == '3'),
-      - el código NO contiene '#'
-      - y la unidad está vacía ('' tras strip),
-      => establecer unidad = 'ud'.
-
-    Respeta el resto de campos y deja todo lo demás intacto.
-    """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_units")
     with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
          tmp.open("w", encoding="latin-1", errors="ignore") as fout:
@@ -281,27 +671,28 @@ def _ensure_ud_for_materials(file_path: Path) -> None:
                 fout.write(raw)
                 continue
 
-            head, rest = raw.split("|", 1)  # "~C", resto
+            head, rest = raw.split("|", 1)
             parts = rest.rstrip("\n")
-            # El registro ~C termina siempre con '|', así que al hacer split
-            # el último elemento suele ser '' (campo vacío final). Lo mantenemos.
             fields = parts.split("|")
             while len(fields) < 6:
-                fields.append("")  # code, unidad, desc, price, date, tipo
+                fields.append("")
 
             code = fields[0]
             unidad = fields[1]
             tipo = fields[5]
 
-            # Solo descompuestos reales tipo 3 sin '#', y sin unidad informada
             if tipo.strip() == "3" and "#" not in code and (unidad.strip() == ""):
                 fields[1] = "ud"
 
-            # Reconstruir manteniendo el mismo estilo (una tubería final)
             line = f"{head}|{'|'.join(fields)}|\n"
             fout.write(line)
 
     tmp.replace(file_path)
+
+
+# --------------------------------------------------------------------------- #
+# Modelos internos BC3
+# --------------------------------------------------------------------------- #
 
 @dataclass
 class Concept:
@@ -313,7 +704,6 @@ class Concept:
     long_desc: str | None = None
 
 
-# --------------------------- util numéricas --------------------------------- #
 def _to_float(s: str) -> float | None:
     s = (s or "").strip()
     if not s:
@@ -324,7 +714,6 @@ def _to_float(s: str) -> float | None:
         return None
 
 
-# --------------------------- normalización / tokens ------------------------- #
 def _normalize_space_lower(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
 
@@ -340,193 +729,17 @@ def _score_token_overlap(a: str, b: str) -> int:
     return len(ta & tb)
 
 
-# --------------------------- hints (Tipo/Grupo/Familia) --------------------- #
-@dataclass
-class HintsTree:
-    tipos: List[str]
-    grupos: List[str]
-    familias: List[str]
-    # mapas rápidos en minúsculas para comparación
-    tipos_l: set[str]
-    grupos_l: set[str]
-    familias_l: set[str]
-
-
-def _load_hints_tree_xlsx(path: Path) -> HintsTree:
-    """
-    Lee un Excel con columnas (case-insensitive) [Tipo, Grupo, Familia].
-    Devuelve los valores únicos y normalizados.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Hints Excel no encontrado: {path}")
-
-    # Buscamos columnas estándar ignorando mayúsculas
-    df = pd.read_excel(path, sheet_name=0, dtype=str).fillna("")
-    cols = {c.lower(): c for c in df.columns}
-
-    def pick(*names: str) -> str:
-        for n in names:
-            if n in cols:
-                return cols[n]
-        raise KeyError(f"No se encontró ninguna de las columnas {names} en {path.name}")
-
-    col_tipo = pick("tipo", "type")
-    col_grupo = pick("grupo", "group")
-    col_fam = pick("familia", "family")
-
-    tipos = sorted({str(v).strip() for v in df[col_tipo].tolist() if str(v).strip()})
-    grupos = sorted({str(v).strip() for v in df[col_grupo].tolist() if str(v).strip()})
-    familias = sorted({str(v).strip() for v in df[col_fam].tolist() if str(v).strip()})
-
-    return HintsTree(
-        tipos=tipos,
-        grupos=grupos,
-        familias=familias,
-        tipos_l={_normalize_space_lower(x) for x in tipos},
-        grupos_l={_normalize_space_lower(x) for x in grupos},
-        familias_l={_normalize_space_lower(x) for x in familias},
-    )
-
-
-def _default_hints() -> HintsTree:
-    """
-    Fallback si no hay Excel: usa los hints que nos diste para Tipo/Grupo y
-    deriva familias desde el catálogo cuando sea posible.
-    """
-    tipos = ["Coste Directo", "Coste Indirecto"]
-    grupos = [
-        "MATERIALES",
-        "SUBCONTRATA MANO DE OBRA",
-        "SUBCONTRATA CON APORTE MATERIALES",
-        "MAQUINARIA: ALQUILER",
-        "MAQUINARIA: REPUESTOS Y REPARACIONES",
-        "MEDIOS AUXILIARES: ALQUILER",
-        "MEDIOS AUXILIARES: COMPRA",
-        "MANO DE OBRA INDIRECTA",
-        "CONSUMOS",
-        "INFRAESTRUCTURA",
-        "MAQUINARIA AJENA",
-        "MAQUINARIA PROPIA",
-        "TRABAJOS PROFESIONALES EXTERNOS",
-        "OTROS COSTES INDIRECTOS",
-    ]
-    return HintsTree(
-        tipos=tipos,
-        grupos=grupos,
-        familias=[],
-        tipos_l={_normalize_space_lower(x) for x in tipos},
-        grupos_l={_normalize_space_lower(x) for x in grupos},
-        familias_l=set(),
-    )
-
-
-def _load_hints_from_env_or_arg(hints_tree_xlsx: Optional[Path]) -> HintsTree:
-    if hints_tree_xlsx:
-        try:
-            return _load_hints_tree_xlsx(hints_tree_xlsx)
-        except Exception:
-            pass
-    env_p = os.getenv("PHASE2_HINTS_XLSX", "").strip()
-    if env_p:
-        try:
-            return _load_hints_tree_xlsx(Path(env_p))
-        except Exception:
-            pass
-    # fallback
-    return _default_hints()
-
-
-# --------------------------- parsing de candidato de catálogo --------------- #
-def _parse_catalog_desc(desc: str) -> Dict[str, str]:
-    """
-    La descripción del catálogo viene como:
-      'Coste Directo, MATERIALES, ACERO ESTRUCTURAL, ACERO CORRUGADO PARA HORMIGON'
-       0: tipo (Coste Directo/Indirecto)
-       1: grupo (MATERIALES / SUBCONTRATA ... )
-       2: familia (ACERO ESTRUCTURAL ...)
-       3: producto (ACERO CORRUGADO ...)
-    """
-    parts = [p.strip() for p in (desc or "").split(",")]
-    return {
-        "tipo": parts[0] if len(parts) > 0 else "",
-        "grupo": parts[1] if len(parts) > 1 else "",
-        "familia": parts[2] if len(parts) > 2 else "",
-        "producto": parts[3] if len(parts) > 3 else "",
-    }
-
-
-# --------------------------- reglas lingüísticas grupo ---------------------- #
-def _infer_group_from_phrases(text: str) -> Optional[str]:
-    """
-    Reglas actualizadas:
-      - 'suministro' + 'material'/'materiales' -> SUBCONTRATA CON APORTE MATERIALES
-      - 'suministro y colocacion|montaje|aplicacion' -> SUBCONTRATA CON APORTE MATERIALES
-      - Si menciona 'incluye' y 'mano de obra' y 'material(es)' -> SUBCONTRATA CON APORTE MATERIALES
-      - Solo 'montaje' o 'aplicacion' (sin suministro) -> SUBCONTRATA MANO DE OBRA
-      - 'suministro' sin materiales explícitos -> SUBCONTRATA MANO DE OBRA
-    """
-    t = _normalize_space_lower(clean_text(text))
-    has_sum = "suministro" in t
-    has_mont = ("montaje" in t) or ("colocacion" in t) or ("colocación" in t)
-    has_apli = ("aplicacion" in t) or ("aplicación" in t)
-    has_incluye = any(w in t for w in ("incluye", "incluido", "incluida", "incluidos"))
-    has_mo = "mano de obra" in t or "elaboracion" in t or "elaboración" in t
-    has_mat = "material" in t or "materiales" in t
-
-    # 1) Casos claros de SUBCONTRATA CON APORTE MATERIALES
-    if (
-        (has_sum and (has_mont or has_apli))            # suministro + colocación/montaje/aplicación
-        or (has_incluye and has_mo and has_mat)        # incluye + MO + materiales
-        or (has_sum and has_mat)                       # suministro + materiales explícitos
-    ):
-        return "SUBCONTRATA CON APORTE MATERIALES"
-
-    # 2) Solo mano de obra (montaje / aplicación sin suministro)
-    if (has_mont or has_apli or (has_incluye and has_mo)) and not has_sum:
-        return "SUBCONTRATA MANO DE OBRA"
-
-    # 3) Suministro sin materiales explícitos -> subcontrata genérica (MO)
-    if has_sum:
-        return "SUBCONTRATA MANO DE OBRA"
-
-    return None
-
-
-# --------------------------- recogida BC3/contexto -------------------------- #
-def _safe_with_suffix(base: str, suffix: str) -> str:
-    base = base[: max(0, MAX_CODE_LEN - len(suffix))]
-    return (base + suffix)[:MAX_CODE_LEN]
-
-
-def _letters_suffix(n: int) -> str:
-    # 1->a, 2->b, ... 26->z, 27->aa, etc.
-    s = ""
-    while n > 0:
-        n -= 1
-        s = chr(97 + (n % 26)) + s
-        n //= 26
-    return s
-
-
 def _collect_bc3_info(
     path: Path,
 ) -> Tuple[
     Dict[str, Concept],
     Dict[str, str],
-    Dict[str, List[str]],      # parents_of: child -> [parents...]
-    Dict[str, List[str]],      # children_of: parent -> [children...]
+    Dict[str, List[str]],
+    Dict[str, List[str]],
 ]:
-    """
-    Devuelve:
-      concepts: code -> Concept (desc corta, unidad, precio, tipo, long_desc)
-      long_map: code -> primera ~T
-      parents_of: child_code -> lista de padres (puede haber varios si el child aparece en varias ~D)
-      children_of: parent_code -> lista de hijos (acumulada)
-    """
     concepts: Dict[str, Concept] = {}
     long_map: Dict[str, str] = {}
 
-    # OJO: un mismo child puede aparecer en varias partidas -> multi-parent
     parents_of_set: Dict[str, set[str]] = {}
     children_of: Dict[str, List[str]] = {}
 
@@ -566,393 +779,17 @@ def _collect_bc3_info(
                     children.append(ch)
 
                 if children:
-                    # acumular (no sobrescribir)
                     children_of.setdefault(parent, [])
                     children_of[parent].extend(children)
 
-    # enganchar long_desc
     for c in concepts.values():
         if c.code in long_map:
             c.long_desc = long_map[c.code]
 
-    # convertir parents_of a listas ordenadas para determinismo
-    parents_of: Dict[str, List[str]] = {
-        ch: sorted(list(ps)) for ch, ps in parents_of_set.items()
-    }
-
+    parents_of: Dict[str, List[str]] = {ch: sorted(list(ps)) for ch, ps in parents_of_set.items()}
     return concepts, long_map, parents_of, children_of
 
 
-def _context_for(code: str, concepts: Dict[str, Concept], parents_of: Dict[str, List[str]]) -> str:
-    """
-    Construye un contexto textual.
-    Si el código aparece en varias partidas/padres, incluye esa información para que el LLM
-    no se “case” con un único árbol erróneo.
-    """
-    from collections import deque
-
-    parts: List[str] = []
-    parts.append("Presupuesto de obra en España, elaborado en PRESTO.")
-
-    # Padres directos (pueden ser varios)
-    direct_parents = parents_of.get(code, []) or []
-    if direct_parents:
-        parts.append(f"Padres directos detectados ({len(direct_parents)}):")
-        for p in direct_parents[:10]:
-            c = concepts.get(p)
-            if not c:
-                parts.append(f"- [{p}] (sin ~C)")
-                continue
-            short = clean_text(c.desc_short)
-            longt = clean_text(c.long_desc or "")
-            parts.append(f"- [{p}] {short}. {('Texto: ' + longt) if longt else ''}")
-
-        if len(direct_parents) > 10:
-            parts.append(f"(+{len(direct_parents) - 10} padres directos más…)")
-
-    # Detectar partidas (tipo 0) “más cercanas” por BFS hacia arriba
-    partidas: set[str] = set()
-    q = deque()
-    seen: set[str] = set()
-
-    for p in direct_parents:
-        q.append(p)
-
-    while q:
-        cur = q.popleft()
-        if cur in seen:
-            continue
-        seen.add(cur)
-
-        ccur = concepts.get(cur)
-        if ccur and (ccur.tipo or "").strip() == "0":
-            partidas.add(cur)
-            # no expandimos por encima de una partida (queremos la más cercana)
-            continue
-
-        for pp in parents_of.get(cur, []) or []:
-            if pp not in seen:
-                q.append(pp)
-
-    if partidas:
-        parts.append("Partidas (tipo 0) cercanas detectadas:")
-        for pk in sorted(partidas)[:20]:
-            cpk = concepts.get(pk)
-            if cpk:
-                parts.append(f"- [{pk}] {clean_text(cpk.desc_short)}")
-            else:
-                parts.append(f"- [{pk}] (sin ~C)")
-        if len(partidas) > 20:
-            parts.append(f"(+{len(partidas) - 20} partidas más…)")
-
-    # Descompuesto objetivo
-    c0 = concepts.get(code)
-    if c0:
-        parts.append("Descompuesto a clasificar:")
-        parts.append(f"- Código actual: {code}")
-        parts.append(f"- Descripción corta: {clean_text(c0.desc_short)}")
-        if c0.long_desc:
-            parts.append(f"- Descripción larga: {clean_text(c0.long_desc)}")
-
-    return "\n".join(p for p in parts if p)
-
-
-
-# --------------------------- few-shots / prompt ----------------------------- #
-def _load_fewshots_from_env() -> List[Dict[str, Any]]:
-    """
-    Si existe PHASE2_FEWSHOTS_PATH (JSON), lo carga.
-    Cada ejemplo:
-      { "title": "...", "context": "...", "candidates":[{"code":..., "desc":...}], "best_code":"...", "rationale":"..." }
-    """
-    p = os.getenv("PHASE2_FEWSHOTS_PATH", "").strip()
-    if not p:
-        return []
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if isinstance(data, list):
-                return data
-    except Exception:
-        pass
-    return []
-
-def _candidate_as_row(c: Dict[str, str]) -> Dict[str, str]:
-    """
-    Normaliza campos para la tabla del prompt:
-     - Codigo producto
-     - Descripcion producto
-     - Descripcion familia
-     - Descripcion grupo
-     - Descripcion tipo
-    Admite dos formatos:
-      a) c = {"code":..., "desc":"Coste Directo, GRUPO, FAMILIA, PRODUCTO"}
-      b) c = {"code":..., "product":..., "family":..., "group":..., "type":...}
-         (o claves en español: "producto"/"familia"/"grupo"/"tipo")
-    """
-    code = c.get("code") or c.get("Codigo producto") or ""
-    # intentar el formato (b)
-    prod = c.get("product") or c.get("producto") or c.get("Descripcion producto") or ""
-    fam = c.get("family") or c.get("familia") or c.get("Descripcion familia") or ""
-    grp = c.get("group") or c.get("grupo") or c.get("Descripcion grupo") or ""
-    typ = c.get("type") or c.get("tipo") or c.get("Descripcion tipo") or ""
-
-    if not (prod or fam or grp or typ):
-        # caer a (a) => desc con comas
-        parts = [p.strip() for p in (c.get("desc") or "").split(",")]
-        typ = parts[0] if len(parts) > 0 else ""
-        grp = parts[1] if len(parts) > 1 else ""
-        fam = parts[2] if len(parts) > 2 else ""
-        prod = parts[3] if len(parts) > 3 else ""
-
-    return {
-        "Codigo producto": code,
-        "Descripcion producto": prod,
-        "Descripcion familia": fam,
-        "Descripcion grupo": grp,
-        "Descripcion tipo": typ,
-    }
-
-DEFAULT_FEWSHOTS: List[Dict[str, Any]] = [
-    {
-        "title": "Alicatado porcelánico con suministro y colocación",
-        "context": (
-            "DESCRIPCION CORTA: ALICATADO PORCELANICO STARK ANTRACITA_REV02\n"
-            "DESCRIPCION LARGA: Suministro y colocacion de Alicatado porcelanico de gran formato STARK ANTRACITA "
-            "de GRESPANIA, 60x120 cm, 11,5mm, recibido con adhesivo especial porcelanico, sin incluir enfoscado, "
-            "incluido cortes, ingletes, piezas especiales y rejuntado; limpieza; según ficha técnica.\n"
-            "PADRES: ALICATADOS Y REVESTIMIENTOS"
-        ),
-        # En few-shots basta con incluir el ganador; los candidatos reales van en el caso actual.
-        "candidates": [{"code": "SM3301", "desc": "—"}],
-        "best_code": "SM3301",
-        "rationale": "suministro+colocación ⇒ subcontrata con aporte; revestimiento cerámico"
-    },
-    {
-        "title": "Losa de cimentación con ferralla (incluye elaboración y montaje)",
-        "context": (
-            "DESCRIPCION CORTA: Losa de cimentacion.\n"
-            "DESCRIPCION LARGA: Losa de cimentacion de hormigon armado HA-30..., precio incluye elaboracion y montaje "
-            "de ferralla, vertido con bomba; acabados y curado; no incluye encofrado.\n"
-            "PADRES: CIMENTACION"
-        ),
-        "candidates": [{"code": "SM1002", "desc": "—"}],
-        "best_code": "SM1002",
-        "rationale": "incluye elaboración y MO ⇒ subcontrata con aporte"
-    },
-    {
-        "title": "Descabezado de pilote (solo mano de obra/maquinaria)",
-        "context": (
-            "DESCRIPCION CORTA: Descabezado de pilote de hormigon armado de 65cm.\n"
-            "DESCRIPCION LARGA: Picado de hormigón de cabeza de pilote con martillo neumático; gestión de escombros.\n"
-            "PADRES: CIMENTACION"
-        ),
-        "candidates": [{"code": "SB1007", "desc": "—"}],
-        "best_code": "SB1007",
-        "rationale": "servicio sin materiales ⇒ subcontrata mano de obra"
-    },
-    {
-        "title": "Pintura plástica (suministro y aplicación)",
-        "context": (
-            "DESCRIPCION CORTA: PINTURA PLASTICA LISA MATE COLOR RAL 7016_REV-01B\n"
-            "DESCRIPCION LARGA: Suministro y aplicacion de pintura plástica lisa mate, dos manos, con imprimación.\n"
-            "PADRES: PINTURAS"
-        ),
-        "candidates": [{"code": "SM3102", "desc": "—"}],
-        "best_code": "SM3102",
-        "rationale": "suministro+aplicación ⇒ subcontrata con aporte"
-    },
-]
-
-
-def _compose_super_prompt(
-    context: str,
-    candidates: List[Dict[str, str]],
-    fewshots: List[Dict[str, Any]],
-    tipo_objetivo: Optional[str],
-    grupo_objetivo: Optional[str],
-    familias_hints: List[str],
-) -> str:
-    """
-    Construye el prompt EXACTO que pediste, incluyendo la TABLA DE CANDIDATOS.
-    """
-
-    # 1) Tabla de candidatos legible
-    rows = [_candidate_as_row(c) for c in candidates]
-    tabla = []
-    for r in rows:
-        tabla.append(
-            f"- Codigo producto: {r['Codigo producto']} | "
-            f"Descripcion producto: {r['Descripcion producto']} | "
-            f"Descripcion familia: {r['Descripcion familia']} | "
-            f"Descripcion grupo: {r['Descripcion grupo']} | "
-            f"Descripcion tipo: {r['Descripcion tipo']}"
-        )
-    tabla_str = "\n".join(tabla)
-
-    # 2) Few-shots (opcionales)
-    few = []
-    for ex in fewshots or []:
-        few.append(
-            f"# DESCRIPCION (contexto ejemplo):\n{ex.get('context','')}\n"
-            f"#CODIGO: {ex.get('best_code','')}"
-        )
-    fewshots_str = "\n\n".join(few) if few else ""
-
-    # 3) Pistas extra (tipo/grupo) que se incrustan en el prompt
-    restr_tipo = ""
-    if tipo_objetivo:
-        restr_tipo = (
-            f"IMPORTANTE: Este descompuesto pertenece a **{tipo_objetivo}**. "
-            f"No puedes elegir candidatos de un tipo diferente.\n"
-        )
-
-    pista_grupo = ""
-    if grupo_objetivo:
-        pista_grupo = f"Pista de grupo sugerido: {grupo_objetivo}.\n"
-
-    # 4) Prompt final
-    prompt = f"""##ROL:Eres un clasificador experto en presupuestos de obra (España) y catálogo de productos.
-##OBJETIVO:Tienes que asignar un código de producto a un DESCOMPUESTO de PRESTO.
-##CONTEXTO: Los candidatos estan en la tabla de candidatos que adjunto. El candidato es la columna Codigo producto. 
-En la columna Descripcion producto está la descripción del candidato para darte contexto, es lo que tienes que casar con las descripciones que te daré. 
-En la columna Descripcion familia está el siguiente nivel, en la columna Descripcion grupo el siguiente nivel a ese, y en la columna Descripcion tipo el primer nivel.
-
-Si en el contexto del producto a clasificar aparece 'suministro y colocacion', 'suministro y montaje', 'suministro y aplicacion' o frases que combinen suministro con mano de obra, 
-o si aparecen a la vez palabras como 'suministro' y 'material'/'materiales', entonces pertenece al grupo SUBCONTRATA CON APORTE MATERIALES.
-
-Si solo aparece montaje/aplicacion (sin suministro) pertenece al grupo SUBCONTRATA MANO DE OBRA.
-
-Si aparece 'suministro' sin mencionar materiales de forma explicita lo consideraremos SUBCONTRATA MANO DE OBRA (servicio sin aporte relevante de materiales).
-
-Si el precio incluye elaboracion y mano de obra significa que es una SUBCONTRATA CON APORTE MATERIALES. Siempre que en la partida se habla de incluir o que forma parte la mano de obra, 
-elaboracion o cualquier actividad similar significa que es una SUBCONTRATA; si ademas incluye materiales o habla de estos entonces es con APORTE DE MATERIAL.
-{restr_tipo}{pista_grupo}##INPUT: te voy a dar la descripcion corta y larga del descompuesto, asi como las descripciones de sus padres (partidas y capitulos). 
-Con ese contexto debes seleccionar entre los candidatos.
-##REGLAS: SOLO puedes elegir un código de entre la lista de CANDIDATOS. Si ninguno encaja bien, elige el menos malo, con confianza baja. 
-Da mucha importancia a: Tipo (Coste Directo/Indirecto), Grupo y Familia; también al contexto jerárquico. 
-Prohibido inventar códigos: solo candidatos dados. No puedes elegir candidatos de un nivel distinto (p. ej. si es Coste Directo, evita familias de Coste Indirecto)
-##OUTPUT:Responde en una sola línea: {{"best_code":"<code>", "confidence":<0..1>, "rationale":"<≤20 palabras>"}}. 
-En el rationale dame la descripcion de producto y familia que has elegido y la razón de la elección. 
-Cuando tengas el código revisa que la descripción y familia de este coincide con lo que tienes planteado en el rationale; 
-después de esta revisión si es necesario cambialo para que se parezca al rationale.
-
-### TABLA DE CANDIDATOS
-{tabla_str}
-
-### CONTEXTO REAL
-{context}
-
-### FEW-SHOTS (EJEMPLOS)
-{fewshots_str}
-"""
-    return prompt
-
-
-
-
-# --------------------------- heurística opcional ---------------------------- #
-def _extract_signals_from_context(ctx: str, concepto: Concept, hints: HintsTree) -> Dict[str, Any]:
-    """
-    Extrae señales desde contexto + texto del descompuesto (desc corta/larga) usando hints del Excel:
-      - tipo_sugerido: 'Coste Directo' / 'Coste Indirecto' / None
-      - grupo_sugerido: grupo según frases (suministro/montaje/aplicación) si aparece
-      - tokens: set de tokens, útil para matching laxo
-    """
-    full_txt = " ".join([
-        ctx or "",
-        concepto.desc_short or "",
-        concepto.long_desc or ""
-    ])
-    norm = _normalize_space_lower(clean_text(full_txt))
-
-    # Tipo: buscamos cadenas “coste directo/indirecto” explícitas
-    tipo_sugerido = None
-    if "coste directo" in norm:
-        tipo_sugerido = "Coste Directo"
-    elif "coste indirecto" in norm:
-        tipo_sugerido = "Coste Indirecto"
-
-    # Grupo: reglas de frases
-    grupo_sugerido = _infer_group_from_phrases(full_txt)
-
-    return {
-        "tokens": set(_tokenize(full_txt)),
-        "tipo_sugerido": tipo_sugerido,
-        "grupo_sugerido": grupo_sugerido,
-    }
-
-
-def _prefilter_candidates(
-    concept: Concept,
-    ctx: str,
-    catalog: List[Dict[str, str]],
-    topk: int,
-    hints: HintsTree,
-    use_heuristics: bool,
-) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    """
-    Prefiltra y ranquea candidatos:
-      - Si el contexto sugiere Tipo (Directo/Indirecto), se filtra a ese tipo.
-      - Se aplican pistas de Grupo (si hay) como peso extra (no filtro duro).
-    Devuelve: (candidatos_top, tipo_forzado_o_None)
-    """
-    sig = _extract_signals_from_context(ctx, concept, hints)
-    tipo_obj = sig["tipo_sugerido"]  # puede ser None
-    grupo_obj = sig["grupo_sugerido"]
-
-    # Candidatos con parsing
-    parsed = []
-    for c in catalog:
-        parts = _parse_catalog_desc(c["desc"])
-        parsed.append((c, parts))
-
-    # Filtro duro por Tipo si hay objetivo
-    if tipo_obj:
-        parsed = [(c, p) for (c, p) in parsed if _normalize_space_lower(p["tipo"]) == _normalize_space_lower(tipo_obj)]
-
-    # Scoring
-    query = f"{concept.desc_short} {concept.long_desc or ''} {ctx}"
-    scored: List[Tuple[Dict[str, str], float]] = []
-
-    # Pesos heurísticos
-    if use_heuristics:
-        w_token = float(os.getenv("HEUR_W_TOKEN", "1.0"))
-        w_typ = float(os.getenv("HEUR_W_TIPO", "3.0"))
-        w_grp = float(os.getenv("HEUR_W_GRUPO", "2.5"))
-        w_fam = float(os.getenv("HEUR_W_FAMILIA", "3.0"))
-    else:
-        w_token = 1.0
-        w_typ = 1.0
-        w_grp = 1.0
-        w_fam = 1.0
-
-    for c, p in parsed:
-        # token overlap
-        s = _score_token_overlap(query, c["desc"]) * w_token
-
-        # bonus por Tipo si coincide con sugerido
-        if tipo_obj and _normalize_space_lower(p["tipo"]) == _normalize_space_lower(tipo_obj):
-            s += w_typ
-
-        # bonus por Grupo si coincide con inferido por frases
-        if grupo_obj and _normalize_space_lower(p["grupo"]) == _normalize_space_lower(grupo_obj):
-            s += w_grp
-
-        # bonus por familia si aparece en el texto (si hints familia disponibles)
-        fam = _normalize_space_lower(p["familia"])
-        if fam and (fam in _normalize_space_lower(query)):
-            s += w_fam
-
-        scored.append((c, s))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = [c for c, _ in scored[: max(1, topk)]]
-
-    return top, tipo_obj
-
-
-# --------------------------- builder LLM + heurística ----------------------- #
 def _build_replacement_map(
     bc3_path: Path,
     catalog_path: Path,
@@ -961,71 +798,46 @@ def _build_replacement_map(
     use_heuristics: Optional[bool] = None,
     fewshots: Optional[List[Dict[str, Any]]] = None,
     hints_tree_xlsx: Optional[Path] = None,
+    progress_cb: Optional[Any] = None,
 ) -> Tuple[Dict[str, str], List[Tuple[str, str, float, str]]]:
     """
     Calcula old_code -> new_code SOLO para descompuestos (T=3 o T original 1/2/3).
-
-    ARREGLO CLAVE:
-      - Un old_code puede aparecer en VARIAS partidas (multi-parent).
-      - Debemos garantizar que el new_code elegido para ese old_code NO colisiona en NINGUNA
-        de las partidas donde aparece.
-
-    Reglas:
-      - Si el código original contiene '%', usar **% DESCUENTO#** (método='rule') con numeración global.
-      - Al LLM se le pasan TODOS los productos del catálogo como candidatos.
-      - Versionado:
-          * Solo se añade sufijo cuando hay colisión dentro de una partida (misma partida).
-          * Si un old_code aparece en varias partidas, su new_code debe ser válido (único) en todas ellas.
-      - Validación final:
-          * Comprueba que no hay códigos nuevos duplicados dentro de ninguna partida (considerando multi-partida).
-          * Si OK imprime OK; si no, lista detalle y lanza RuntimeError.
     """
     from collections import defaultdict, deque
 
-    if use_heuristics is None:
-        use_heuristics = os.getenv("PHASE2_USE_HEURISTICS", "false").lower() == "true"
+    io_dump_dir = _resolve_phase2_dump_dir(bc3_path)
+    io_dump_mode = _debug_mode()
 
-    hints = _load_hints_from_env_or_arg(hints_tree_xlsx)
+    if _debug_enabled():
+        if io_dump_dir:
+            print(f"[PHASE2 DEBUG] Dump OCR IO en: {io_dump_dir}")
+        else:
+            print("[PHASE2 DEBUG] Dump ON pero sin carpeta. Se volcará a consola si hace falta.", file=sys.stderr)
 
-    # --- Directorio para volcar prompts: ENV o carpeta 'prompts' junto al BC3 ---
-    raw_dump_dir = os.getenv("PHASE2_PROMPT_DUMP_DIR", "").strip()
-    print(f"[PHASE2 DEBUG] PHASE2_PROMPT_DUMP_DIR (raw) = '{raw_dump_dir}'")
+    # dump info catálogo (para saber si se puede leer y qué sheets tiene)
+    if io_dump_dir:
+        try:
+            info = {
+                "catalog_path": str(catalog_path),
+                "exists": bool(catalog_path.exists()),
+                "size_bytes": catalog_path.stat().st_size if catalog_path.exists() else None,
+                "mtime_utc": datetime.fromtimestamp(catalog_path.stat().st_mtime, tz=timezone.utc).isoformat()
+                if catalog_path.exists() else None,
+                "sheet_env": (os.getenv("BC3_CATALOG_SHEET") or "").strip() or None,
+            }
+            if catalog_path.exists():
+                try:
+                    xls = pd.ExcelFile(catalog_path)
+                    info["sheet_names"] = list(xls.sheet_names)
+                except Exception as e:
+                    info["sheet_names_error"] = str(e)
+            _write_json(io_dump_dir / "__catalog_info.json", info)
+        except Exception:
+            pass
 
-    prompt_dump_path: Optional[Path] = None
-    if raw_dump_dir:
-        cleaned = raw_dump_dir.strip().strip('"').strip("'")
-        dump_dir = Path(os.path.expandvars(os.path.expanduser(cleaned)))
-    else:
-        dump_dir = bc3_path.with_suffix("").parent / "prompts"
-
-    try:
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        prompt_dump_path = dump_dir
-        print(f"[PHASE2 DEBUG] Volcando prompts en: {prompt_dump_path}")
-    except Exception as e:
-        print(f"[PHASE2 WARN] No se pudo crear directorio de prompts {dump_dir}: {e}")
-        prompt_dump_path = None
-
-    # Few-shots (ENV tiene prioridad)
-    fewshots = _load_fewshots_from_env() or fewshots or DEFAULT_FEWSHOTS
-
-    catalog = load_catalog(catalog_path)
     concepts, _longs, parents_of, _children = _collect_bc3_info(bc3_path)
 
-    # Rate limit para Gemini
-    rpm = int(os.getenv("GEMINI_RPM", "10") or "10")
-    limiter = RateLimiter(rpm=rpm)
-
-    batch_mode = (os.getenv("GEMINI_BATCH_MODE", "false").strip().lower() == "true")
-    batch_size = max(1, int(os.getenv("GEMINI_BATCH_SIZE", "10") or "10"))
-    min_conf = float(os.getenv("GEMINI_MIN_CONFIDENCE", str(min_conf)) or 0.0)
-
-    # -------------------- helper: partidas cercanas (multi-parent) --------------------
     def _closest_partidas_for(code: str) -> set[str]:
-        """
-        Devuelve el conjunto de PARTIDAS (tipo '0') más cercanas en el grafo de padres.
-        Si no se encuentra ninguna, devuelve {'__ROOT__'}.
-        """
         direct = parents_of.get(code, []) or []
         if not direct:
             return {"__ROOT__"}
@@ -1043,7 +855,7 @@ def _build_replacement_map(
             ccur = concepts.get(cur)
             if ccur and (ccur.tipo or "").strip() == "0":
                 partidas.add(cur)
-                continue  # no subir más desde aquí
+                continue
 
             for pp in parents_of.get(cur, []) or []:
                 if pp not in seen:
@@ -1051,7 +863,6 @@ def _build_replacement_map(
 
         return partidas or {"__ROOT__"}
 
-    # -------------------- targets únicos (códigos descompuestos) --------------------
     targets: List[str] = []
     for code, c in concepts.items():
         if "#" in code:
@@ -1060,7 +871,6 @@ def _build_replacement_map(
             continue
         targets.append(code)
 
-    # -------------------- mapa old_code -> set(partidas) (multi-partida) --------------------
     partidas_by_old: Dict[str, set[str]] = {}
     olds_by_partida: Dict[str, List[str]] = defaultdict(list)
 
@@ -1070,156 +880,135 @@ def _build_replacement_map(
         for pk in pks:
             olds_by_partida[pk].append(oldc)
 
-    # -------------------- FASE 1: elegir base (sin versionar) --------------------
     base_choice: Dict[str, str] = {}
     conf_choice: Dict[str, float] = {}
     method_choice: Dict[str, str] = {}
 
-    idx = 0
-    while idx < len(targets):
-        group = targets[idx: idx + (batch_size if batch_mode else 1)]
-        group_payload: List[Dict[str, Any]] = []
-        fallbacks: Dict[str, str] = {}
-        tipo_obj_map: Dict[str, Optional[str]] = {}
+    prompt_key = (os.getenv("BC3_CLASSIFY_PROMPT_KEY") or "bc3_clasificador_es").strip()
+    sheet = (os.getenv("BC3_CATALOG_SHEET") or "").strip() or None
 
-        for code in group:
-            c = concepts[code]
+    def _nearest_ancestor_desc(start_code: str, predicate) -> Optional[str]:
+        q = deque([start_code])
+        seen: set[str] = set()
+        while q:
+            cur = q.popleft()
+            for p in (parents_of.get(cur, []) or []):
+                if p in seen:
+                    continue
+                seen.add(p)
+                if predicate(p):
+                    c = concepts.get(p)
+                    if c:
+                        txt = clean_text(c.desc_short or "") or clean_text(c.long_desc or "")
+                        return txt or None
+                q.append(p)
+        return None
 
-            # Regla fija para descuentos por '%' en el CÓDIGO ORIGINAL
-            if "%" in code:
-                base_choice[code] = "% DESCUENTO"
-                conf_choice[code] = 1.0
-                method_choice[code] = "rule"
+    def _partida_desc_for(old_code: str) -> Optional[str]:
+        pks = sorted(list(_closest_partidas_for(old_code)))
+        if not pks or pks == ["__ROOT__"]:
+            return None
+        descs: List[str] = []
+        for pk in pks[:5]:
+            c = concepts.get(pk)
+            if not c:
                 continue
+            d = clean_text(c.desc_short or "") or clean_text(c.long_desc or "")
+            if d:
+                descs.append(d)
+        return " | ".join(descs) if descs else None
 
-            ctx = _context_for(code, concepts, parents_of)
+    def _capitulo_desc_for(old_code: str) -> Optional[str]:
+        pks = sorted(list(_closest_partidas_for(old_code)))
+        start = pks[0] if pks and pks[0] != "__ROOT__" else old_code
 
-            sig = _extract_signals_from_context(ctx, c, hints)
-            tipo_obj = sig["tipo_sugerido"]
-            grupo_obj = sig["grupo_sugerido"]
-            tipo_obj_map[code] = tipo_obj
+        cap = _nearest_ancestor_desc(
+            start,
+            lambda x: ("#" in x) and ("##" not in x) and (x != "CD#"),
+        )
+        sub = _nearest_ancestor_desc(
+            start,
+            lambda x: ("##" in x) and (x != "CD#"),
+        )
+        return cap or sub
 
-            top_candidates = catalog
+    def _subcapitulo_desc_for(old_code: str) -> Optional[str]:
+        pks = sorted(list(_closest_partidas_for(old_code)))
+        start = pks[0] if pks and pks[0] != "__ROOT__" else old_code
+        sub = _nearest_ancestor_desc(
+            start,
+            lambda x: ("##" in x) and (x != "CD#"),
+        )
+        return sub
 
-            # fallback por heurística (sin limitar set del LLM)
-            k = int(os.getenv("PREFILTER_TOPK", str(topk)) or topk)
-            heur_top, _ = _prefilter_candidates(
-                concept=c,
-                ctx=ctx,
-                catalog=catalog,
-                topk=k,
-                hints=hints,
-                use_heuristics=bool(use_heuristics),
-            )
-            fallback_code = heur_top[0]["code"] if heur_top else catalog[0]["code"]
-            fallbacks[code] = fallback_code
-
-            super_ctx = _compose_super_prompt(
-                context=ctx,
-                candidates=top_candidates,
-                fewshots=fewshots,
-                tipo_objetivo=tipo_obj,
-                grupo_objetivo=grupo_obj,
-                familias_hints=hints.familias,
-            )
-
-            if prompt_dump_path is not None:
-                safe_code = re.sub(r"[^A-Za-z0-9_.-]+", "_", code)
-                out_file = prompt_dump_path / f"{safe_code}.txt"
-                try:
-                    with out_file.open("w", encoding="utf-8") as df:
-                        df.write(super_ctx)
-                except Exception as e:
-                    print(f"[PHASE2 WARN] No se pudo escribir prompt {out_file}: {e}")
-
-            group_payload.append(
-                {
-                    "id": code,
-                    "context": super_ctx,
-                    "candidates": [{"code": cc["code"], "desc": cc["desc"]} for cc in top_candidates],
-                }
-            )
-
-        if not group_payload:
-            idx += len(group)
+    for oldc in targets:
+        c = concepts.get(oldc)
+        if not c:
+            base_choice[oldc] = "SIN_CODIGO"
+            conf_choice[oldc] = 0.0
+            method_choice[oldc] = "missing_concept"
             continue
 
-        try:
-            if batch_mode:
-                results = choose_best_code_batch_with_llm(group_payload, limiter=limiter)
-                by_id = {r.get("id"): r for r in results if isinstance(r, dict)}
+        if "%" in oldc:
+            base_choice[oldc] = "% DESCUENTO"
+            conf_choice[oldc] = 1.0
+            method_choice[oldc] = "rule"
+            if progress_cb:
+                progress_cb({"old_code": oldc, "new_code": "% DESCUENTO", "confidence": 1.0})
+            continue
 
-                for item in group_payload:
-                    code = item["id"]
-                    r = by_id.get(code) or {}
-                    best = (r.get("best_code") or "").strip()
-                    conf = float(r.get("confidence", 0.0))
+        desc_short = clean_text(c.desc_short or "")
+        desc_long = clean_text(c.long_desc or "")
+        descripcion = desc_short
+        if desc_long:
+            descripcion = (descripcion + " | " + desc_long).strip(" |")
 
-                    tipo_obj = tipo_obj_map.get(code)
-                    if best:
-                        parts = _parse_catalog_desc(
-                            next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
-                        )
-                        if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
-                            best = ""
+        partida_txt = _partida_desc_for(oldc)
+        capitulo_txt = _capitulo_desc_for(oldc)
+        subcap_txt = _subcapitulo_desc_for(oldc)
 
-                    if not best or conf < min_conf:
-                        best = fallbacks[code]
-                        method = "heuristic+fallback" if use_heuristics else "simple+fallback"
-                        conf_used = max(conf, 0.5 if use_heuristics else 0.4)
-                    else:
-                        method = "llm"
-                        conf_used = conf
+        request: Dict[str, Any] = {
+            "prompt_key": prompt_key,
+            "bc3_id": bc3_path.stem,
+            "top_k_candidates": int(topk),
+            "catalog_xlsx_path": str(catalog_path),
+            "descompuestos": [
+                {
+                    "id": oldc,
+                    "codigo_bc3": oldc,
+                    "descripcion": descripcion or desc_short or oldc,
+                    "capitulo": capitulo_txt,
+                    "subcapitulo": subcap_txt,
+                    "partida": partida_txt,
+                    "unidad": (c.unidad or "").strip() or None,
+                }
+            ],
+        }
+        if sheet:
+            request["catalog_sheet"] = sheet
 
-                    base_choice[code] = (best or "").strip() or "SIN_CODIGO"
-                    conf_choice[code] = float(conf_used)
-                    method_choice[code] = method
+        envelope = _run_ocr_service_bc3_classify(request, dump_dir=io_dump_dir, dump_mode=io_dump_mode)
+        best_code, conf01 = _extract_best_code_from_envelope(envelope)
 
-            else:
-                for item in group_payload:
-                    code = item["id"]
-                    llm = choose_best_code_with_llm(item["context"], item["candidates"], limiter=limiter)
-                    best = (llm.get("best_code") or "").strip()
-                    conf = float(llm.get("confidence", 0.0))
+        best_code = (best_code or "").strip()
+        if not best_code:
+            raise RuntimeError(
+                f"ocr_service devolvió best_code vacío para {oldc}. Envelope keys={list(envelope.keys())}"
+            )
 
-                    tipo_obj = tipo_obj_map.get(code)
-                    if best:
-                        parts = _parse_catalog_desc(
-                            next((c["desc"] for c in item["candidates"] if c["code"] == best), "")
-                        )
-                        if tipo_obj and _normalize_space_lower(parts.get("tipo", "")) != _normalize_space_lower(tipo_obj):
-                            best = ""
+        base_choice[oldc] = best_code
+        conf_choice[oldc] = float(conf01) if conf01 is not None else float(min_conf)
+        method_choice[oldc] = "ocr_service"
 
-                    if not best or conf < min_conf:
-                        best = fallbacks[code]
-                        method = "heuristic+fallback" if use_heuristics else "simple+fallback"
-                        conf_used = max(conf, 0.5 if use_heuristics else 0.4)
-                    else:
-                        method = "llm"
-                        conf_used = conf
+        if progress_cb:
+            progress_cb({"old_code": oldc, "new_code": best_code, "confidence": float(conf_choice[oldc])})
 
-                    base_choice[code] = (best or "").strip() or "SIN_CODIGO"
-                    conf_choice[code] = float(conf_used)
-                    method_choice[code] = method
-
-        except Exception:
-            for item in group_payload:
-                code = item["id"]
-                best = (fallbacks.get(code) or (catalog[0]["code"] if catalog else "SIN_CODIGO")).strip() or "SIN_CODIGO"
-                base_choice[code] = best
-                conf_choice[code] = 0.5 if use_heuristics else 0.4
-                method_choice[code] = "heuristic+error" if use_heuristics else "simple+error"
-
-        idx += len(group)
-
-    # -------------------- FASE 2: versionado consistente multi-partida --------------------
     def _make_code(base: str, k: int) -> str:
         if k <= 0:
             return base[:MAX_CODE_LEN]
-        suf = _letters_suffix(k)  # 1->a, 2->b...
+        suf = _letters_suffix(k)
         return _safe_with_suffix(base, suf)[:MAX_CODE_LEN]
 
-    # 2.1) asignar % DESCUENTO# (por old_code, numeración global estable)
     repl: Dict[str, str] = {}
     discount_counter = 0
     for oldc in targets:
@@ -1227,7 +1016,8 @@ def _build_replacement_map(
             discount_counter += 1
             repl[oldc] = f"% DESCUENTO{discount_counter}"[:MAX_CODE_LEN]
 
-    # 2.2) construir “colores” (sufijos) por base para evitar colisiones
+    from collections import defaultdict
+
     olds_by_base: Dict[str, List[str]] = defaultdict(list)
     for oldc in targets:
         b = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
@@ -1238,10 +1028,8 @@ def _build_replacement_map(
     suffix_idx: Dict[str, int] = {oldc: 0 for oldc in targets if base_choice.get(oldc) != "% DESCUENTO"}
 
     for base, olds in olds_by_base.items():
-        # construir adyacencias: edge si coexisten en alguna partida
         adj: Dict[str, set[str]] = {o: set() for o in olds}
 
-        # pk -> olds con ese base en esa pk
         by_pk: Dict[str, List[str]] = defaultdict(list)
         for o in olds:
             for pk in partidas_by_old.get(o, {"__ROOT__"}):
@@ -1250,14 +1038,12 @@ def _build_replacement_map(
         for pk, lst in by_pk.items():
             if len(lst) <= 1:
                 continue
-            # clique entre todos los que coexisten
             for i in range(len(lst)):
                 for j in range(i + 1, len(lst)):
                     a, b2 = lst[i], lst[j]
                     adj[a].add(b2)
                     adj[b2].add(a)
 
-        # greedy coloring (0,1,2...)
         order = sorted(olds, key=lambda o: (len(adj[o]), o), reverse=True)
         colors: Dict[str, int] = {}
 
@@ -1271,14 +1057,12 @@ def _build_replacement_map(
         for o, ccol in colors.items():
             suffix_idx[o] = max(suffix_idx.get(o, 0), ccol)
 
-    # 2.3) construir códigos iniciales
     for oldc in targets:
         if oldc in repl:
             continue
         base = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
         repl[oldc] = _make_code(base, suffix_idx.get(oldc, 0))
 
-    # 2.4) “bump” defensivo: si aún hay colisiones por truncado/raros, subir sufijo del peor conf.
     def _find_dup_cases() -> List[Tuple[str, str, List[str]]]:
         seen_by_partida: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         for oldc, newc in repl.items():
@@ -1298,17 +1082,13 @@ def _build_replacement_map(
         dup_cases = _find_dup_cases()
         if not dup_cases:
             break
-
         if bumps >= max_bumps:
-            # dejamos que la validación final imprima detalle y reviente
             break
 
-        # elegimos un caso y “bump” del de menor confianza (más razonable mover)
         pk, newc, olds = dup_cases[0]
         bump_old = min(olds, key=lambda o: conf_choice.get(o, 0.0))
 
         if base_choice.get(bump_old) == "% DESCUENTO":
-            # no debería pasar (ya son únicos), pero por seguridad:
             bumps += 1
             continue
 
@@ -1317,14 +1097,12 @@ def _build_replacement_map(
         repl[bump_old] = _make_code(base, suffix_idx[bump_old])
         bumps += 1
 
-    # -------------------- rows (estable) --------------------
     rows: List[Tuple[str, str, float, str]] = []
     for oldc in targets:
         if oldc not in repl:
             continue
         rows.append((oldc, repl[oldc], float(conf_choice.get(oldc, 0.0)), str(method_choice.get(oldc, ""))))
 
-    # -------------------- VALIDACIÓN FINAL (multi-partida real) --------------------
     dup_cases = _find_dup_cases()
     if not dup_cases:
         print("[PHASE2 OK] Validación de unicidad por partida: sin duplicados de código nuevo.")
@@ -1342,20 +1120,26 @@ def _build_replacement_map(
         f"Revisa asignación/versionado."
     )
 
-# --------------------------- reescritura BC3 -------------------------------- #
+
+def _safe_with_suffix(base: str, suffix: str) -> str:
+    base = base[: max(0, MAX_CODE_LEN - len(suffix))]
+    return (base + suffix)[:MAX_CODE_LEN]
+
+
+def _letters_suffix(n: int) -> str:
+    s = ""
+    while n > 0:
+        n -= 1
+        s = chr(97 + (n % 26)) + s
+        n //= 26
+    return s
+
+
 def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> None:
     """
-    Reescribe el BC3 aplicando solo el cambio de CÓDIGO (nada más):
-      - ~C: cambia el campo 'code' si está en repl_map
-      - ~D: cambia únicamente el 'child_code' en los tripletes (child\coef\qty)
-            y **preserva exactamente** el nº de barras '\' antes de '|'
-      - ~M: cambia únicamente el 'child' en el par <parent>\<child>
-
-    Implementación sobre records tipados (ConceptRecord, DescomposicionRecord,
-    MedicionesRecord) pero replicando exactamente la semántica anterior.
+    Reescribe el BC3 aplicando solo el cambio de CÓDIGO (nada más).
     """
     if not repl_map:
-        # Comportamiento previo: si no hay nada que sustituir, copiar tal cual
         dst.write_text(src.read_text("latin-1", errors="ignore"), "latin-1", errors="ignore")
         return
 
@@ -1364,30 +1148,22 @@ def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> No
 
         for raw in fin:
             if raw.startswith("~C|"):
-                # Antes: split("|"), reemplazar parts[0] si está en repl_map, y reescribir
                 try:
                     rec = ConceptRecord.parse(raw)
                     rec.map_code(repl_map)
                     fout.write(rec.to_line())
                 except Exception:
-                    # Ante cualquier problema, conservamos la línea original
                     fout.write(raw)
 
             elif raw.startswith("~D|"):
-                # Antes: parsing manual de tripletes child\coef\qty y preservando
-                # las barras finales. Ahora hacemos EXACTAMENTE lo mismo
-                # encapsulado en DescomposicionRecord.
                 try:
                     rec = DescomposicionRecord.parse(raw)
                     rec.map_child_codes(repl_map)
                     fout.write(rec.to_line())
                 except Exception:
-                    # En caso de línea malformada, mantenemos comportamiento robusto
                     fout.write(raw)
 
             elif raw.startswith("~M|"):
-                # Antes: solo cambiábamos el 'child' del par <parent>\<child>
-                # si existía, y reescribíamos "~M|pair|tail".
                 try:
                     rec = MedicionesRecord.parse(raw)
                     rec.map_child_codes(repl_map)
@@ -1396,11 +1172,9 @@ def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> No
                     fout.write(raw)
 
             else:
-                # Resto de registros (~T, ~M raros, comentarios, etc.) se dejan igual
                 fout.write(raw)
 
 
-# --------------------------- runner (con CSV de mapping) -------------------- #
 def _write_mapping_csv(rows: List[Tuple[str, str, float, str]], csv_path: Path) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
@@ -1418,28 +1192,13 @@ def run_phase2(
 ) -> Path:
     """
     Fase 2: clasifica descompuestos contra catálogo y sustituye códigos.
-
-    NUEVO:
-      - refcru_template_xlsx: plantilla exportada desde BC (con asignación XML)
-      - refcru_out: ruta salida del excel para paquete REFCRU
-      - emit_refcru_xlsx: bool (default True) para generar el excel importable en BC
-
-    Defaults (en EXE):
-      MiApp/
-        MiApp.exe
-        data/
-          catalog/catalog.xlsx
-          templates/REFCRU_template.xlsx
     """
-    import sys
+    import sys as _sys
 
-    # ------------------ helpers para rutas (EXE / dev) ------------------ #
     def _app_dir() -> Path:
-        # En exe (PyInstaller): sys.executable apunta al exe real
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
-        # En dev: script lanzador
-        return Path(sys.argv[0]).resolve().parent
+        if getattr(_sys, "frozen", False):
+            return Path(_sys.executable).resolve().parent
+        return Path(_sys.argv[0]).resolve().parent
 
     def _first_existing(candidates: list[Path]) -> Optional[Path]:
         for p in candidates:
@@ -1453,7 +1212,6 @@ def run_phase2(
     base_dir = _app_dir()
     data_dir = base_dir / "data"
 
-    # ------------------ alias compat GUI ------------------ #
     if bc3_in is None:
         bc3_in = kwargs.pop("input_bc3", None)
     if catalog_xlsx is None:
@@ -1461,7 +1219,6 @@ def run_phase2(
     if bc3_out is None:
         bc3_out = kwargs.pop("output_bc3", None)
 
-    # ------------------ defaults catálogo (si GUI no lo pasó) ------------------ #
     if catalog_xlsx is None:
         env_cat = os.getenv("PHASE2_CATALOG_XLSX", "").strip()
         if env_cat:
@@ -1489,12 +1246,6 @@ def run_phase2(
     else:
         bc3_out = Path(bc3_out)
 
-    # ------------------ extras IA/hints ------------------ #
-    use_heuristics = kwargs.pop("use_heuristics", None)
-    fewshots = kwargs.pop("fewshots", None)
-    hints_tree_xlsx = kwargs.pop("hints_tree_xlsx", None)
-
-    # ------------------ REFCRU template + salida ------------------ #
     emit_refcru_xlsx = bool(kwargs.pop("emit_refcru_xlsx", True))
     refcru_template_xlsx = kwargs.pop("refcru_template_xlsx", None) or kwargs.pop("refcru_template", None)
     refcru_out = kwargs.pop("refcru_out", None)
@@ -1522,23 +1273,18 @@ def run_phase2(
     else:
         refcru_out = Path(refcru_out)
 
-    # ------------------ callback progreso (GUI) ------------------ #
     progress_cb = None
     for k in ("progress_cb", "on_progress", "progress_callback", "callback", "logger"):
         if k in kwargs and kwargs[k] is not None:
             progress_cb = kwargs[k]
             break
 
-    # ------------------ ejecutar IA -> repl_map ------------------ #
     repl_map, rows = _build_replacement_map(
         bc3_in,
         catalog_xlsx,
-        use_heuristics=use_heuristics,
-        fewshots=fewshots,
-        hints_tree_xlsx=hints_tree_xlsx,
+        progress_cb=progress_cb,
     )
 
-    # ------------------ reescritura BC3 ------------------ #
     rewrite_bc3_with_codes(bc3_in, bc3_out, repl_map)
     _cleanup_trailing_pipes_file(bc3_out)
 
@@ -1555,15 +1301,13 @@ def run_phase2(
     except Exception:
         pass
 
-    # ------------------ generar REFCRU usando plantilla con XML mapping ------------------ #
     if emit_refcru_xlsx:
         if refcru_template_xlsx is None or not refcru_template_xlsx.exists():
-            print(f"[PHASE2 WARN] No se encontró plantilla REFCRU (XML mapping). No se genera XLSX REFCRU.")
+            print("[PHASE2 WARN] No se encontró plantilla REFCRU (XML mapping). No se genera XLSX REFCRU.")
             if progress_cb:
                 progress_cb("Aviso: no se encontró plantilla REFCRU. Selecciónala con 'Buscar...'")
         else:
             ref_rows: List[RefCruRow] = []
-            # Orden estable: rows
             for oldc, newc, _conf, _method in rows:
                 ref_rows.append(make_refcru_row(item_no=newc, reference_no=oldc))
 
