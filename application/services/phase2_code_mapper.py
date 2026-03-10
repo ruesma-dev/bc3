@@ -6,24 +6,25 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import os
 import re
-import json
 import csv
-import sys
-import subprocess
-from collections import deque
-
+from collections import defaultdict, deque
 from datetime import datetime, timezone
-import uuid
 
 import pandas as pd
 
+from application.services.budget_bc3_batch_service import (
+    BudgetBc3BatchRequest,
+    BudgetBc3BatchService,
+)
+from infrastructure.clients.bc3_classifier_subprocess_client import (
+    Bc3ClassifierSubprocessClient,
+)
 from utils.text_sanitize import clean_text
 from domain.bc3.records import (
     ConceptRecord,
     DescomposicionRecord,
     MedicionesRecord,
 )
-
 from infrastructure.filesystem.bc_refcru_package_writer import (
     RefCruRow,
     write_refcru_config_package_xlsx,
@@ -35,6 +36,38 @@ NUM_RE = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
 _PIPE_TAIL_RE = re.compile(r"\|+\s*$")
 
+def _load_local_dotenv_once() -> None:
+    if getattr(_load_local_dotenv_once, "_done", False):
+        return
+
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except Exception:
+        _load_local_dotenv_once._done = True
+        return
+
+    candidates: List[Path] = []
+    here = Path(__file__).resolve()
+    candidates.append(Path.cwd() / ".env")
+    for parent in [here.parent] + list(here.parents):
+        candidates.append(parent / ".env")
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            load_dotenv(dotenv_path=candidate, override=False)
+            _load_local_dotenv_once._done = True
+            return
+
+    load_dotenv(override=False)
+    _load_local_dotenv_once._done = True
+
+
+_load_local_dotenv_once()
 
 def _final_trim_trailing_pipes(file_path: Path) -> None:
     """
@@ -62,7 +95,7 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
 def _fix_d_trailing_backslashes(file_path: Path) -> None:
     """
     Normaliza las líneas ~D para que terminen en '\\|':
-      - si no hay barra antes del último '|', añade UNA '\'
+      - si no hay barra antes del último '|', añade UNA '\\'
       - si hay varias barras, las reduce a UNA sola
     """
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_dfix")
@@ -150,445 +183,9 @@ def _normalize_unit_key(u: str) -> str:
     return s
 
 
-# ---------------------------- OCR_SERVICE helpers ----------------------------
-
-def _module_rel_candidates(module: str) -> list[Path]:
-    parts = [p for p in (module or "").split(".") if p]
-    mp = Path(*parts)
-    return [
-        mp.with_suffix(".py"),
-        mp / "__init__.py",
-        mp / "__main__.py",
-    ]
-
-
-def _root_has_module(root: Path, module: str) -> bool:
-    if not root:
-        return False
-    for base in (root, root / "src"):
-        for rel in _module_rel_candidates(module):
-            try:
-                if (base / rel).exists():
-                    return True
-            except Exception:
-                continue
-    return False
-
-
-def _guess_repo_root_from_file() -> Optional[Path]:
-    """
-    Intenta inferir el root del repo actual (bc3) subiendo hasta encontrar 'application/'.
-    """
-    try:
-        here = Path(__file__).resolve()
-        for p in [here.parent] + list(here.parents):
-            if (p / "application").exists():
-                return p
-    except Exception:
-        pass
-    return None
-
-
-def _resolve_ocr_service_root(module: Optional[str] = None) -> Optional[Path]:
-    """
-    Carpeta raíz del repo ocr_service para ejecutar el módulo -m con imports correctos.
-    """
-    module = module or (os.getenv("OCR_SERVICE_MODULE") or "interface_adapters.cli.bc3_classify_stdin").strip()
-
-    env_p = (os.getenv("OCR_SERVICE_ROOT") or os.getenv("OCR_SERVICE_WORKDIR") or "").strip()
-    if env_p:
-        pp = Path(os.path.expandvars(os.path.expanduser(env_p.strip('"').strip("'"))))
-        if pp.exists():
-            if _root_has_module(pp, module):
-                return pp
-            return pp
-
-    bc3_root = _guess_repo_root_from_file()
-    if bc3_root:
-        cand = bc3_root / "ocr_service"
-        if cand.exists() and _root_has_module(cand, module):
-            return cand
-
-        sib = bc3_root.parent / "ocr_service"
-        if sib.exists() and _root_has_module(sib, module):
-            return sib
-
-        try:
-            parent = bc3_root.parent
-            count = 0
-            for d in parent.iterdir():
-                if not d.is_dir():
-                    continue
-                count += 1
-                if count > 60:
-                    break
-
-                if _root_has_module(d, module):
-                    return d
-                dd = d / "ocr_service"
-                if dd.exists() and _root_has_module(dd, module):
-                    return dd
-        except Exception:
-            pass
-
-    return None
-
-
-def _resolve_ocr_service_python(ocr_root: Optional[Path] = None) -> str:
-    """
-    Devuelve el python.exe que ejecutará el ocr_service.
-
-    Orden:
-      1) ENV OCR_SERVICE_PYTHON / OCR_SERVICE_PY
-      2) Si hay ocr_root, intentar <ocr_root>/.venv/(Scripts|bin)/python
-      3) fallback: sys.executable
-    """
-    p = (os.getenv("OCR_SERVICE_PYTHON") or os.getenv("OCR_SERVICE_PY") or "").strip()
-    if p:
-        return p.strip('"').strip("'")
-
-    if ocr_root:
-        candidates = [
-            ocr_root / ".venv" / "Scripts" / "python.exe",
-            ocr_root / ".venv" / "bin" / "python",
-            ocr_root / "venv" / "Scripts" / "python.exe",
-            ocr_root / "venv" / "bin" / "python",
-        ]
-        for c in candidates:
-            try:
-                if c.exists():
-                    return str(c)
-            except Exception:
-                continue
-
-    return sys.executable
-
-
-def _debug_enabled() -> bool:
-    """
-    DEBUG ON por defecto (para tu fase de depuración).
-    Para desactivar:
-      PHASE2_DUMP_OCR_IO=0
-    """
-    v = os.getenv("PHASE2_DUMP_OCR_IO")
-    if v is None or v.strip() == "":
-        return True
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _debug_mode() -> str:
-    return (os.getenv("PHASE2_DUMP_OCR_MODE", "all").strip().lower() or "all")
-
-
-def _utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-
-
-def _safe_slug(s: str, max_len: int = 120) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
-    s = s.strip("._-")
-    return (s[:max_len] if s else "item")
-
-
-def _write_json(path: Path, obj: Any) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        print(f"[PHASE2 WARN] No pude escribir JSON en {path}: {e}", file=sys.stderr)
-        try:
-            print(json.dumps(obj, ensure_ascii=False, indent=2), file=sys.stderr)
-        except Exception:
-            pass
-
-
-def _write_text(path: Path, txt: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(txt or "", encoding="utf-8", errors="ignore")
-    except Exception as e:
-        print(f"[PHASE2 WARN] No pude escribir TXT en {path}: {e}", file=sys.stderr)
-        try:
-            print(txt or "", file=sys.stderr)
-        except Exception:
-            pass
-
-
-def _resolve_phase2_dump_dir(bc3_path: Path) -> Optional[Path]:
-    """
-    Reglas pedidas:
-      - Primero intenta PHASE2_DUMP_OCR_DIR si existe
-      - Si no: carpeta output del proyecto bc3
-      - Si no: output junto al bc3
-      - Si no: ruta del bc3
-      - Si no puede escribir: None (y entonces volcamos a consola)
-    """
-    if not _debug_enabled():
-        return None
-
-    base_env = (os.getenv("PHASE2_DUMP_OCR_DIR", "") or "").strip()
-    candidates: list[Path] = []
-
-    if base_env:
-        candidates.append(Path(os.path.expandvars(os.path.expanduser(base_env.strip('"').strip("'")))))
-
-    bc3_root = _guess_repo_root_from_file()
-    if bc3_root:
-        candidates.append(bc3_root / "output")
-
-    candidates.append(bc3_path.parent / "output")
-    candidates.append(bc3_path.parent)
-
-    run_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-    for base_dir in candidates:
-        try:
-            base_dir.mkdir(parents=True, exist_ok=True)
-            out = base_dir / "phase2_ocr_io" / f"{bc3_path.stem}_{run_tag}"
-            out.mkdir(parents=True, exist_ok=True)
-            return out
-        except Exception:
-            continue
-
-    return None
-
-
-def _parse_json_from_mixed_output(stdout_text: str, stderr_text: str = "") -> Any:
-    s = (stdout_text or "").lstrip("\ufeff").strip()
-    if not s:
-        raise ValueError(f"stdout vacío (stderr: {stderr_text[:500]})")
-
-    try:
-        return json.loads(s)
-    except Exception:
-        pass
-
-    dec = json.JSONDecoder()
-    for i, ch in enumerate(s):
-        if ch not in "{[":
-            continue
-        try:
-            obj, _end = dec.raw_decode(s[i:])
-            return obj
-        except Exception:
-            continue
-
-    raise ValueError(
-        "No se pudo extraer JSON de stdout. "
-        f"STDOUT(head): {s[:500]}\nSTDERR(head): {(stderr_text or '')[:500]}"
-    )
-
-
-def _run_ocr_service_bc3_classify(
-    payload: Dict[str, Any],
-    *,
-    dump_dir: Optional[Path] = None,
-    dump_mode: str = "all",
-) -> Dict[str, Any]:
-    """
-    Llama al CLI del ocr_service por subprocess enviando payload por stdin.
-    Devuelve el envelope dict parseado.
-    """
-    module = (os.getenv("OCR_SERVICE_MODULE") or "interface_adapters.cli.bc3_classify_stdin").strip()
-    cwd = _resolve_ocr_service_root(module)
-    py = _resolve_ocr_service_python(cwd)
-    timeout_s = int((os.getenv("OCR_SERVICE_TIMEOUT_S") or "240").strip())
-
-    cmd = [py, "-m", module]
-
-    item_id = ""
-    try:
-        ds0 = (payload.get("descompuestos") or [])[0] or {}
-        item_id = str(ds0.get("id") or ds0.get("codigo_bc3") or "")
-    except Exception:
-        item_id = ""
-
-    trace_id = f"{_utc_stamp()}_{_safe_slug(item_id) if item_id else 'call'}_{uuid.uuid4().hex[:8]}"
-
-    # Si no hay dump_dir y debug está ON: avisamos (y luego volcamos a consola en caso extremo)
-    if _debug_enabled() and dump_dir is None:
-        print("[PHASE2 DEBUG] Dump ON pero no pude crear carpeta de dump. Fallback: consola.", file=sys.stderr)
-
-    if dump_dir and dump_mode in {"all"}:
-        _write_json(dump_dir / f"{trace_id}__request.json", payload)
-    elif _debug_enabled() and dump_dir is None and dump_mode in {"all"}:
-        print(f"[PHASE2 DEBUG] REQUEST trace_id={trace_id}\n{json.dumps(payload, ensure_ascii=False, indent=2)}", file=sys.stderr)
-
-    # Propagar flags de debug al ocr_service
-    env = os.environ.copy()
-    if _debug_enabled():
-        env.setdefault("PHASE2_DUMP_OCR_IO", "1")
-        env.setdefault("PHASE2_DUMP_OCR_MODE", dump_mode or "all")
-        # pasar base dir (no el subdir del trace) para que ocr_service cree su subcarpeta
-        if dump_dir:
-            env.setdefault("PHASE2_DUMP_OCR_DIR", str(dump_dir.parents[1] if len(dump_dir.parents) >= 2 else dump_dir.parent))
-
-    proc = subprocess.run(
-        cmd,
-        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        timeout=timeout_s,
-        env=env,
-    )
-
-    stdout = proc.stdout.decode("utf-8", errors="replace")
-    stderr = proc.stderr.decode("utf-8", errors="replace")
-
-    if proc.returncode != 0:
-        if dump_dir and dump_mode in {"all", "errors"}:
-            _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
-            _write_text(dump_dir / f"{trace_id}__stdout.txt", stdout)
-            _write_json(
-                dump_dir / f"{trace_id}__error.json",
-                {
-                    "trace_id": trace_id,
-                    "cmd": cmd,
-                    "cwd": str(cwd) if cwd else None,
-                    "returncode": proc.returncode,
-                    "request": payload,
-                    "stderr": stderr,
-                    "stdout": stdout,
-                },
-            )
-        else:
-            print(f"[PHASE2 DEBUG] STDERR:\n{stderr}\nSTDOUT:\n{stdout}", file=sys.stderr)
-
-        raise RuntimeError(
-            "Fallo llamando a ocr_service.\n"
-            f"CMD: {' '.join(cmd)}\n"
-            f"CWD: {cwd}\n"
-            f"RC: {proc.returncode}\n"
-            f"STDERR:\n{stderr}\n"
-            f"STDOUT:\n{stdout}\n"
-            "Sugerencia: comprueba OCR_SERVICE_ROOT/OCR_SERVICE_PYTHON o que el módulo exista.\n"
-        )
-
-    envelope = _parse_json_from_mixed_output(stdout, stderr)
-    if not isinstance(envelope, dict):
-        if dump_dir and dump_mode in {"all", "errors"}:
-            _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
-            _write_text(dump_dir / f"{trace_id}__stdout.txt", stdout)
-            _write_json(
-                dump_dir / f"{trace_id}__bad_response.json",
-                {
-                    "trace_id": trace_id,
-                    "cmd": cmd,
-                    "cwd": str(cwd) if cwd else None,
-                    "returncode": proc.returncode,
-                    "request": payload,
-                    "stderr": stderr,
-                    "stdout": stdout,
-                    "parsed_type": str(type(envelope)),
-                },
-            )
-        raise ValueError(f"Respuesta no dict. type={type(envelope)} head={str(envelope)[:200]}")
-
-    if dump_dir and dump_mode in {"all"}:
-        _write_text(dump_dir / f"{trace_id}__stderr.txt", stderr)
-        _write_json(dump_dir / f"{trace_id}__response.json", envelope)
-    elif _debug_enabled() and dump_dir is None and dump_mode in {"all"}:
-        print(f"[PHASE2 DEBUG] RESPONSE trace_id={trace_id}\n{json.dumps(envelope, ensure_ascii=False, indent=2)}", file=sys.stderr)
-
-    return envelope
-
-
-def _extract_best_code_from_envelope(envelope: Dict[str, Any]) -> tuple[str, float]:
-    """
-    Extrae (best_code, confidence) del envelope devuelto por ocr_service.
-
-    IMPORTANTE:
-      - ocr_service devuelve 'codigo_interno' (según tu prompt actual)
-      - confianza puede venir como 0..1 o como porcentaje 0..100 ('confianza_pct')
-    """
-    def _coerce_conf(x: Any) -> float:
-        if x is None:
-            return 0.0
-        try:
-            f = float(x)
-        except Exception:
-            return 0.0
-        if f < 0:
-            return 0.0
-        # si viene 0..100
-        if f > 1.0:
-            if f <= 100.0:
-                return f / 100.0
-            return min(1.0, f / 100.0)
-        return f
-
-    data = envelope.get("data", envelope)
-
-    # Si viene como lista directa
-    if isinstance(data, list) and data:
-        first = data[0]
-        if isinstance(first, dict):
-            code = (
-                first.get("codigo_interno")
-                or first.get("codigo_producto")
-                or first.get("best_code")
-                or first.get("code")
-                or ""
-            )
-            conf = (
-                first.get("confidence")
-                or first.get("confianza")
-                or first.get("score")
-                or first.get("confianza_pct")
-                or first.get("confidence_pct")
-                or 0.0
-            )
-            return str(code).strip(), _coerce_conf(conf)
-
-    if isinstance(data, dict):
-        for key in ("clasificaciones", "resultados", "items", "outputs", "descompuestos"):
-            v = data.get(key)
-            if isinstance(v, list) and v:
-                first = v[0]
-                if isinstance(first, dict):
-                    code = (
-                        first.get("codigo_interno")
-                        or first.get("codigo_producto")
-                        or first.get("best_code")
-                        or first.get("code")
-                        or ""
-                    )
-                    conf = (
-                        first.get("confidence")
-                        or first.get("confianza")
-                        or first.get("score")
-                        or first.get("confianza_pct")
-                        or first.get("confidence_pct")
-                        or 0.0
-                    )
-                    return str(code).strip(), _coerce_conf(conf)
-
-        code = (
-            data.get("codigo_interno")
-            or data.get("codigo_producto")
-            or data.get("best_code")
-            or data.get("code")
-            or ""
-        )
-        if isinstance(code, str) and code.strip():
-            conf = (
-                data.get("confidence")
-                or data.get("confianza")
-                or data.get("score")
-                or data.get("confianza_pct")
-                or data.get("confidence_pct")
-                or 0.0
-            )
-            return code.strip(), _coerce_conf(conf)
-
-    raise ValueError(f"No pude extraer best_code de la respuesta. keys={list(envelope.keys())}")
-
-
 # --------------------------------------------------------------------------- #
-# Unificación de unidades (igual que lo tenías)
+# Unificación de unidades                                                     #
 # --------------------------------------------------------------------------- #
-
 _UNIT_VARIANTS: dict[str, set[str]] = {
     "%": {"%"},
     "CM": {"CM", "CENTIMETRO", "CENTÍMETRO"},
@@ -691,9 +288,8 @@ def _ensure_ud_for_materials(file_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Modelos internos BC3
+# Modelos internos BC3                                                        #
 # --------------------------------------------------------------------------- #
-
 @dataclass
 class Concept:
     code: str
@@ -790,6 +386,53 @@ def _collect_bc3_info(
     return concepts, long_map, parents_of, children_of
 
 
+def _coerce_conf_to_01(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        f = float(value)
+    except Exception:
+        return 0.0
+    if f < 0:
+        return 0.0
+    if f > 1.0:
+        if f <= 100.0:
+            return f / 100.0
+        return min(1.0, f / 100.0)
+    return f
+
+
+def _extract_result_code_and_conf(result_item: Dict[str, Any]) -> tuple[str, float]:
+    code = (
+        result_item.get("codigo_interno")
+        or result_item.get("codigo_producto")
+        or result_item.get("best_code")
+        or result_item.get("code")
+        or ""
+    )
+    conf = (
+        result_item.get("confidence")
+        or result_item.get("confianza")
+        or result_item.get("score")
+        or result_item.get("confianza_pct")
+        or result_item.get("confidence_pct")
+        or 0.0
+    )
+    return str(code).strip(), _coerce_conf_to_01(conf)
+
+
+def _resultados_by_id(resultados: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in resultados:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            continue
+        out[item_id] = item
+    return out
+
+
 def _build_replacement_map(
     bc3_path: Path,
     catalog_path: Path,
@@ -802,39 +445,12 @@ def _build_replacement_map(
 ) -> Tuple[Dict[str, str], List[Tuple[str, str, float, str]]]:
     """
     Calcula old_code -> new_code SOLO para descompuestos (T=3 o T original 1/2/3).
+
+    CAMBIO CLAVE:
+    - Ya no llama al servicio 2 línea a línea.
+    - Construye la lista completa de descompuestos y usa BudgetBc3BatchService,
+      que agrupa en lotes reales de N según BC3_REQUEST_BATCH_SIZE / BC3_LLM_BATCH_SIZE / GEMINI_BATCH_SIZE.
     """
-    from collections import defaultdict, deque
-
-    io_dump_dir = _resolve_phase2_dump_dir(bc3_path)
-    io_dump_mode = _debug_mode()
-
-    if _debug_enabled():
-        if io_dump_dir:
-            print(f"[PHASE2 DEBUG] Dump OCR IO en: {io_dump_dir}")
-        else:
-            print("[PHASE2 DEBUG] Dump ON pero sin carpeta. Se volcará a consola si hace falta.", file=sys.stderr)
-
-    # dump info catálogo (para saber si se puede leer y qué sheets tiene)
-    if io_dump_dir:
-        try:
-            info = {
-                "catalog_path": str(catalog_path),
-                "exists": bool(catalog_path.exists()),
-                "size_bytes": catalog_path.stat().st_size if catalog_path.exists() else None,
-                "mtime_utc": datetime.fromtimestamp(catalog_path.stat().st_mtime, tz=timezone.utc).isoformat()
-                if catalog_path.exists() else None,
-                "sheet_env": (os.getenv("BC3_CATALOG_SHEET") or "").strip() or None,
-            }
-            if catalog_path.exists():
-                try:
-                    xls = pd.ExcelFile(catalog_path)
-                    info["sheet_names"] = list(xls.sheet_names)
-                except Exception as e:
-                    info["sheet_names_error"] = str(e)
-            _write_json(io_dump_dir / "__catalog_info.json", info)
-        except Exception:
-            pass
-
     concepts, _longs, parents_of, _children = _collect_bc3_info(bc3_path)
 
     def _closest_partidas_for(code: str) -> set[str]:
@@ -941,6 +557,9 @@ def _build_replacement_map(
         )
         return sub
 
+    request_items: List[Dict[str, Any]] = []
+    request_items_by_id: Dict[str, Dict[str, Any]] = {}
+
     for oldc in targets:
         c = concepts.get(oldc)
         if not c:
@@ -967,41 +586,100 @@ def _build_replacement_map(
         capitulo_txt = _capitulo_desc_for(oldc)
         subcap_txt = _subcapitulo_desc_for(oldc)
 
-        request: Dict[str, Any] = {
-            "prompt_key": prompt_key,
-            "bc3_id": bc3_path.stem,
-            "top_k_candidates": int(topk),
-            "catalog_xlsx_path": str(catalog_path),
-            "descompuestos": [
-                {
-                    "id": oldc,
-                    "codigo_bc3": oldc,
-                    "descripcion": descripcion or desc_short or oldc,
-                    "capitulo": capitulo_txt,
-                    "subcapitulo": subcap_txt,
-                    "partida": partida_txt,
-                    "unidad": (c.unidad or "").strip() or None,
-                }
-            ],
+        item = {
+            "id": oldc,
+            "codigo_bc3": oldc,
+            "descripcion": descripcion or desc_short or oldc,
+            "capitulo": capitulo_txt,
+            "subcapitulo": subcap_txt,
+            "partida": partida_txt,
+            "unidad": (c.unidad or "").strip() or None,
         }
-        if sheet:
-            request["catalog_sheet"] = sheet
+        request_items.append(item)
+        request_items_by_id[oldc] = item
 
-        envelope = _run_ocr_service_bc3_classify(request, dump_dir=io_dump_dir, dump_mode=io_dump_mode)
-        best_code, conf01 = _extract_best_code_from_envelope(envelope)
+    if request_items:
+        bc3_client = Bc3ClassifierSubprocessClient.from_env()
+        batch_service = BudgetBc3BatchService(bc3_client=bc3_client)
+        processed_ids: set[str] = set()
 
-        best_code = (best_code or "").strip()
-        if not best_code:
+        def _on_batch_progress(
+            batch_index: int,
+            total_batches: int,
+            batch_items: List[Dict[str, Any]],
+            batch_results: List[Dict[str, Any]],
+        ) -> None:
+            results_by_id = _resultados_by_id(batch_results)
+            batch_ids = [str(item.get("id") or "").strip() for item in batch_items]
+            missing_ids = [item_id for item_id in batch_ids if item_id and item_id not in results_by_id]
+            if missing_ids:
+                raise RuntimeError(
+                    "El servicio BC3 no devolvió todos los ids del lote. "
+                    f"batch={batch_index}/{total_batches} missing_ids={missing_ids}"
+                )
+
+            for item in batch_items:
+                oldc = str(item.get("id") or "").strip()
+                if not oldc:
+                    continue
+                result_item = results_by_id.get(oldc)
+                if result_item is None:
+                    raise RuntimeError(f"Resultado BC3 ausente para id={oldc}")
+
+                best_code, conf01 = _extract_result_code_and_conf(result_item)
+                if not best_code:
+                    raise RuntimeError(f"codigo_interno vacío para id={oldc}")
+
+                base_choice[oldc] = best_code
+                conf_choice[oldc] = conf01 if conf01 is not None else float(min_conf)
+                method_choice[oldc] = "ocr_service_batch"
+                processed_ids.add(oldc)
+
+                if progress_cb:
+                    progress_cb(
+                        {
+                            "old_code": oldc,
+                            "new_code": best_code,
+                            "confidence": float(conf_choice[oldc]),
+                        }
+                    )
+
+        batch_request = BudgetBc3BatchRequest(
+            prompt_key=prompt_key,
+            bc3_id=bc3_path.stem,
+            catalog_xlsx_path=str(catalog_path),
+            catalog_sheet=sheet,
+            top_k_candidates=int(topk),
+            descompuestos=request_items,
+            batch_size=None,
+        )
+        response = batch_service.classify_budget(
+            batch_request,
+            progress_callback=_on_batch_progress,
+        )
+
+        final_resultados = (response.get("data") or {}).get("resultados") or []
+        final_by_id = _resultados_by_id(final_resultados if isinstance(final_resultados, list) else [])
+
+        for oldc in request_items_by_id:
+            if oldc in base_choice:
+                continue
+            result_item = final_by_id.get(oldc)
+            if result_item is None:
+                raise RuntimeError(f"Resultado final BC3 ausente para id={oldc}")
+            best_code, conf01 = _extract_result_code_and_conf(result_item)
+            if not best_code:
+                raise RuntimeError(f"codigo_interno final vacío para id={oldc}")
+            base_choice[oldc] = best_code
+            conf_choice[oldc] = conf01 if conf01 is not None else float(min_conf)
+            method_choice[oldc] = "ocr_service_batch"
+
+        not_processed = [oldc for oldc in request_items_by_id if oldc not in base_choice]
+        if not_processed:
             raise RuntimeError(
-                f"ocr_service devolvió best_code vacío para {oldc}. Envelope keys={list(envelope.keys())}"
+                "No se pudieron clasificar todos los descompuestos BC3. "
+                f"Pendientes={not_processed}"
             )
-
-        base_choice[oldc] = best_code
-        conf_choice[oldc] = float(conf01) if conf01 is not None else float(min_conf)
-        method_choice[oldc] = "ocr_service"
-
-        if progress_cb:
-            progress_cb({"old_code": oldc, "new_code": best_code, "confidence": float(conf_choice[oldc])})
 
     def _make_code(base: str, k: int) -> str:
         if k <= 0:
@@ -1015,8 +693,6 @@ def _build_replacement_map(
         if base_choice.get(oldc) == "% DESCUENTO":
             discount_counter += 1
             repl[oldc] = f"% DESCUENTO{discount_counter}"[:MAX_CODE_LEN]
-
-    from collections import defaultdict
 
     olds_by_base: Dict[str, List[str]] = defaultdict(list)
     for oldc in targets:

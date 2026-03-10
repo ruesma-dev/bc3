@@ -170,6 +170,8 @@ cython_debug/
 .output/
 .output/debug_ocr_io/
 .output/phase2_ocr_io/
+.logs/
+
 
 
 
