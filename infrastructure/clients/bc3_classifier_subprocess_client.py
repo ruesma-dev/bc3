@@ -414,17 +414,6 @@ def _clean_env_path(raw: Optional[str]) -> Optional[Path]:
     return Path(os.path.expandvars(os.path.expanduser(value)))
 
 
-def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
-    return max(1, value)
-
-
 def _read_first_int_env(names: List[str], default: int) -> int:
     for name in names:
         raw = os.getenv(name)
@@ -436,13 +425,6 @@ def _read_first_int_env(names: List[str], default: int) -> int:
             continue
         return max(1, value)
     return default
-
-
-def _read_bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _read_first_bool_env(names: List[str], default: bool) -> bool:

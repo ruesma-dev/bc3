@@ -23,11 +23,9 @@ ProgressCallback = Callable[[int, int, List[Dict[str, Any]], List[Dict[str, Any]
 class BudgetBc3BatchRequest:
     prompt_key: str
     bc3_id: str
-    catalog_xlsx_path: str
     descompuestos: List[Dict[str, Any]]
     batch_size: int | None = None
     top_k_candidates: int = 20
-    catalog_sheet: str | None = None
 
 
 class BudgetBc3BatchService:
@@ -129,8 +127,6 @@ class BudgetBc3BatchService:
                     {
                         "prompt_key": request.prompt_key,
                         "bc3_id": request.bc3_id,
-                        "catalog_xlsx_path": request.catalog_xlsx_path,
-                        "catalog_sheet": request.catalog_sheet,
                         "top_k_candidates": request.top_k_candidates,
                         "batch_size": batch_size,
                         "descompuestos": request.descompuestos,
@@ -159,8 +155,6 @@ class BudgetBc3BatchService:
         return {
             "prompt_key": request.prompt_key,
             "bc3_id": request.bc3_id,
-            "catalog_xlsx_path": request.catalog_xlsx_path,
-            "catalog_sheet": request.catalog_sheet,
             "top_k_candidates": request.top_k_candidates,
             "llm_batch_size": batch_size,
             "descompuestos": batch_items,
