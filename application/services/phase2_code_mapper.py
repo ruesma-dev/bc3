@@ -1,13 +1,13 @@
 # application/services/phase2_code_mapper.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 import csv
 import os
 import re
 from collections import defaultdict, deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from application.services.budget_bc3_batch_service import (
     BudgetBc3BatchRequest,
@@ -18,8 +18,8 @@ from domain.bc3.records import (
     DescomposicionRecord,
     MedicionesRecord,
 )
-from infrastructure.clients.bc3_classifier_subprocess_client import (
-    Bc3ClassifierSubprocessClient,
+from infrastructure.clients.bc3_classifier_library_client import (
+    Bc3ClassifierLibraryClient,
 )
 from infrastructure.filesystem.bc_refcru_package_writer import (
     RefCruRow,
@@ -47,16 +47,19 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_clean")
     pat = re.compile(r"\|+\s*$")
 
-    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
-         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, tmp.open(
+        "w",
+        encoding="latin-1",
+        errors="ignore",
+    ) as fout:
         for raw in fin:
             if raw.startswith("~"):
-                s = raw.rstrip("\n")
-                s = pat.sub("|", s)
-                fout.write(s + "\n")
+                line = raw.rstrip("\n")
+                line = pat.sub("|", line)
+                fout.write(line + "\n")
             else:
                 if not raw.endswith("\n"):
-                    raw = raw + "\n"
+                    raw += "\n"
                 fout.write(raw)
 
     tmp.replace(file_path)
@@ -65,19 +68,22 @@ def _final_trim_trailing_pipes(file_path: Path) -> None:
 def _fix_d_trailing_backslashes(file_path: Path) -> None:
     tmp = file_path.with_suffix(file_path.suffix + ".tmp_dfix")
 
-    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, \
-         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+    with file_path.open("r", encoding="latin-1", errors="ignore") as fin, tmp.open(
+        "w",
+        encoding="latin-1",
+        errors="ignore",
+    ) as fout:
         for raw in fin:
             if raw.startswith("~D|"):
-                s = raw.rstrip("\n")
-                if s.endswith("|"):
-                    core = s[:-1]
+                line = raw.rstrip("\n")
+                if line.endswith("|"):
+                    core = line[:-1]
                     core = core.rstrip("\\") + "\\"
-                    s = core + "|"
-                fout.write(s + "\n")
+                    line = core + "|"
+                fout.write(line + "\n")
             else:
                 if not raw.endswith("\n"):
-                    raw = raw + "\n"
+                    raw += "\n"
                 fout.write(raw)
 
     tmp.replace(file_path)
@@ -85,8 +91,11 @@ def _fix_d_trailing_backslashes(file_path: Path) -> None:
 
 def _cleanup_trailing_pipes_file(path: Path) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with path.open("r", encoding="latin-1", errors="ignore") as fin, \
-         tmp.open("w", encoding="latin-1", errors="ignore") as fout:
+    with path.open("r", encoding="latin-1", errors="ignore") as fin, tmp.open(
+        "w",
+        encoding="latin-1",
+        errors="ignore",
+    ) as fout:
         for line in fin:
             if line.rstrip("\n").endswith("|"):
                 clean = _PIPE_TAIL_RE.sub("|", line.rstrip("\n")) + "\n"
@@ -137,19 +146,19 @@ def _collect_bc3_info(
 
                 children: List[str] = []
                 for i in range(0, len(chunks), 3):
-                    ch = (chunks[i] if i < len(chunks) else "").strip()
-                    if not ch:
+                    child_code = (chunks[i] if i < len(chunks) else "").strip()
+                    if not child_code:
                         continue
-                    parents_of_set.setdefault(ch, set()).add(parent)
-                    children.append(ch)
+                    parents_of_set.setdefault(child_code, set()).add(parent)
+                    children.append(child_code)
 
                 if children:
                     children_of.setdefault(parent, [])
                     children_of[parent].extend(children)
 
     parents_of: Dict[str, List[str]] = {
-        ch: sorted(list(parents))
-        for ch, parents in parents_of_set.items()
+        child: sorted(list(parents))
+        for child, parents in parents_of_set.items()
     }
     return concepts, parents_of, children_of
 
@@ -165,23 +174,23 @@ def _closest_partidas_for(
         return {"__ROOT__"}
 
     partidas: set[str] = set()
-    q = deque(direct)
+    queue = deque(direct)
     seen: set[str] = set()
 
-    while q:
-        cur = q.popleft()
-        if cur in seen:
+    while queue:
+        current = queue.popleft()
+        if current in seen:
             continue
-        seen.add(cur)
+        seen.add(current)
 
-        ccur = concepts.get(cur)
-        if ccur and (ccur.tipo or "").strip() == "0":
-            partidas.add(cur)
+        current_concept = concepts.get(current)
+        if current_concept and (current_concept.tipo or "").strip() == "0":
+            partidas.add(current)
             continue
 
-        for pp in parents_of.get(cur, []) or []:
-            if pp not in seen:
-                q.append(pp)
+        for parent in parents_of.get(current, []) or []:
+            if parent not in seen:
+                queue.append(parent)
 
     return partidas or {"__ROOT__"}
 
@@ -193,21 +202,23 @@ def _nearest_ancestor_desc(
     parents_of: Dict[str, List[str]],
     predicate,
 ) -> Optional[str]:
-    q = deque([start_code])
+    queue = deque([start_code])
     seen: set[str] = set()
 
-    while q:
-        cur = q.popleft()
-        for parent in (parents_of.get(cur, []) or []):
+    while queue:
+        current = queue.popleft()
+        for parent in parents_of.get(current, []) or []:
             if parent in seen:
                 continue
             seen.add(parent)
             if predicate(parent):
                 concept = concepts.get(parent)
                 if concept:
-                    txt = clean_text(concept.desc_short or "") or clean_text(concept.long_desc or "")
+                    txt = clean_text(concept.desc_short or "") or clean_text(
+                        concept.long_desc or ""
+                    )
                     return txt or None
-            q.append(parent)
+            queue.append(parent)
 
     return None
 
@@ -218,20 +229,30 @@ def _partida_desc_for(
     concepts: Dict[str, Concept],
     parents_of: Dict[str, List[str]],
 ) -> Optional[str]:
-    pks = sorted(list(_closest_partidas_for(old_code, concepts=concepts, parents_of=parents_of)))
-    if not pks or pks == ["__ROOT__"]:
+    partidas = sorted(
+        list(
+            _closest_partidas_for(
+                old_code,
+                concepts=concepts,
+                parents_of=parents_of,
+            )
+        )
+    )
+    if not partidas or partidas == ["__ROOT__"]:
         return None
 
-    descs: List[str] = []
-    for pk in pks[:5]:
-        concept = concepts.get(pk)
+    descriptions: List[str] = []
+    for partida_code in partidas[:5]:
+        concept = concepts.get(partida_code)
         if not concept:
             continue
-        desc = clean_text(concept.desc_short or "") or clean_text(concept.long_desc or "")
+        desc = clean_text(concept.desc_short or "") or clean_text(
+            concept.long_desc or ""
+        )
         if desc:
-            descs.append(desc)
+            descriptions.append(desc)
 
-    return " | ".join(descs) if descs else None
+    return " | ".join(descriptions) if descriptions else None
 
 
 def _capitulo_desc_for(
@@ -240,8 +261,16 @@ def _capitulo_desc_for(
     concepts: Dict[str, Concept],
     parents_of: Dict[str, List[str]],
 ) -> Optional[str]:
-    pks = sorted(list(_closest_partidas_for(old_code, concepts=concepts, parents_of=parents_of)))
-    start = pks[0] if pks and pks[0] != "__ROOT__" else old_code
+    partidas = sorted(
+        list(
+            _closest_partidas_for(
+                old_code,
+                concepts=concepts,
+                parents_of=parents_of,
+            )
+        )
+    )
+    start = partidas[0] if partidas and partidas[0] != "__ROOT__" else old_code
 
     cap = _nearest_ancestor_desc(
         start,
@@ -264,8 +293,16 @@ def _subcapitulo_desc_for(
     concepts: Dict[str, Concept],
     parents_of: Dict[str, List[str]],
 ) -> Optional[str]:
-    pks = sorted(list(_closest_partidas_for(old_code, concepts=concepts, parents_of=parents_of)))
-    start = pks[0] if pks and pks[0] != "__ROOT__" else old_code
+    partidas = sorted(
+        list(
+            _closest_partidas_for(
+                old_code,
+                concepts=concepts,
+                parents_of=parents_of,
+            )
+        )
+    )
+    start = partidas[0] if partidas and partidas[0] != "__ROOT__" else old_code
 
     return _nearest_ancestor_desc(
         start,
@@ -300,6 +337,17 @@ def _extract_best_code_from_result(item: Dict[str, Any]) -> Tuple[str, float]:
     return code, conf
 
 
+def _resolve_library_method(item: Dict[str, Any]) -> str:
+    source = str(item.get("confidence_source") or "").strip().lower()
+    if source.startswith("fallback"):
+        return "library_batch_fallback"
+    if source.startswith("selector_override") or source.startswith("blended"):
+        return "library_batch_llm_selector"
+    if source == "model_raw":
+        return "library_batch_llm"
+    return "library_batch"
+
+
 def _make_code(base: str, k: int) -> str:
     if k <= 0:
         return base[:MAX_CODE_LEN]
@@ -313,12 +361,12 @@ def _safe_with_suffix(base: str, suffix: str) -> str:
 
 
 def _letters_suffix(n: int) -> str:
-    s = ""
+    suffix = ""
     while n > 0:
         n -= 1
-        s = chr(97 + (n % 26)) + s
+        suffix = chr(97 + (n % 26)) + suffix
         n //= 26
-    return s
+    return suffix
 
 
 def _build_replacement_map(
@@ -337,9 +385,9 @@ def _build_replacement_map(
         targets.append(code)
 
     partidas_by_old: Dict[str, set[str]] = {}
-    for oldc in targets:
-        partidas_by_old[oldc] = _closest_partidas_for(
-            oldc,
+    for old_code in targets:
+        partidas_by_old[old_code] = _closest_partidas_for(
+            old_code,
             concepts=concepts,
             parents_of=parents_of,
         )
@@ -349,48 +397,48 @@ def _build_replacement_map(
     method_choice: Dict[str, str] = {}
 
     batch_items: List[Dict[str, Any]] = []
-    special_discount_targets: List[str] = []
 
-    for oldc in targets:
-        concept = concepts.get(oldc)
+    for old_code in targets:
+        concept = concepts.get(old_code)
         if not concept:
-            base_choice[oldc] = "SIN_CODIGO"
-            conf_choice[oldc] = 0.0
-            method_choice[oldc] = "missing_concept"
+            base_choice[old_code] = "SIN_CODIGO"
+            conf_choice[old_code] = 0.0
+            method_choice[old_code] = "missing_concept"
             continue
 
-        if "%" in oldc:
-            special_discount_targets.append(oldc)
-            base_choice[oldc] = "% DESCUENTO"
-            conf_choice[oldc] = 1.0
-            method_choice[oldc] = "rule"
+        if "%" in old_code:
+            base_choice[old_code] = "% DESCUENTO"
+            conf_choice[old_code] = 1.0
+            method_choice[old_code] = "rule"
             if progress_cb:
-                progress_cb({"old_code": oldc, "new_code": "% DESCUENTO", "confidence": 1.0})
+                progress_cb(
+                    {"old_code": old_code, "new_code": "% DESCUENTO", "confidence": 1.0}
+                )
             continue
 
         desc_short = clean_text(concept.desc_short or "")
         desc_long = clean_text(concept.long_desc or "")
-        descripcion = desc_short
+        description = desc_short
         if desc_long:
-            descripcion = (descripcion + " | " + desc_long).strip(" |")
+            description = (description + " | " + desc_long).strip(" |")
 
         batch_items.append(
             {
-                "id": oldc,
-                "codigo_bc3": oldc,
-                "descripcion": descripcion or desc_short or oldc,
+                "id": old_code,
+                "codigo_bc3": old_code,
+                "descripcion": description or desc_short or old_code,
                 "capitulo": _capitulo_desc_for(
-                    oldc,
+                    old_code,
                     concepts=concepts,
                     parents_of=parents_of,
                 ),
                 "subcapitulo": _subcapitulo_desc_for(
-                    oldc,
+                    old_code,
                     concepts=concepts,
                     parents_of=parents_of,
                 ),
                 "partida": _partida_desc_for(
-                    oldc,
+                    old_code,
                     concepts=concepts,
                     parents_of=parents_of,
                 ),
@@ -400,9 +448,11 @@ def _build_replacement_map(
 
     if batch_items:
         batch_service = BudgetBc3BatchService(
-            bc3_client=Bc3ClassifierSubprocessClient.from_env(),
+            bc3_client=Bc3ClassifierLibraryClient.from_env(),
         )
-        prompt_key = (os.getenv("BC3_CLASSIFY_PROMPT_KEY") or "bc3_clasificador_es").strip()
+        prompt_key = (
+            os.getenv("BC3_CLASSIFY_PROMPT_KEY") or "bc3_clasificador_es"
+        ).strip()
 
         def _on_batch_progress(
             batch_index: int,
@@ -410,6 +460,8 @@ def _build_replacement_map(
             request_items: List[Dict[str, Any]],
             batch_results: List[Dict[str, Any]],
         ) -> None:
+            _ = batch_index
+            _ = total_batches
             results_by_id = {
                 str(item.get("id") or "").strip(): item
                 for item in batch_results
@@ -417,27 +469,27 @@ def _build_replacement_map(
             }
 
             for request_item in request_items:
-                oldc = str(request_item.get("id") or "").strip()
-                result_item = results_by_id.get(oldc)
+                old_code = str(request_item.get("id") or "").strip()
+                result_item = results_by_id.get(old_code)
                 if result_item is None:
                     raise RuntimeError(
-                        f"El servicio BC3 no devolvió resultado para id={oldc}"
+                        f"El servicio BC3 no devolvió resultado para id={old_code}"
                     )
 
                 best_code, conf01 = _extract_best_code_from_result(result_item)
                 if not best_code:
                     raise RuntimeError(
-                        f"El servicio BC3 devolvió codigo_interno vacío para id={oldc}"
+                        f"El servicio BC3 devolvió codigo_interno vacío para id={old_code}"
                     )
 
-                base_choice[oldc] = best_code
-                conf_choice[oldc] = conf01
-                method_choice[oldc] = "ocr_service_batch"
+                base_choice[old_code] = best_code
+                conf_choice[old_code] = conf01
+                method_choice[old_code] = _resolve_library_method(result_item)
 
                 if progress_cb:
                     progress_cb(
                         {
-                            "old_code": oldc,
+                            "old_code": old_code,
                             "new_code": best_code,
                             "confidence": conf01,
                         }
@@ -454,31 +506,31 @@ def _build_replacement_map(
 
     repl: Dict[str, str] = {}
     discount_counter = 0
-    for oldc in targets:
-        if base_choice.get(oldc) == "% DESCUENTO":
+    for old_code in targets:
+        if base_choice.get(old_code) == "% DESCUENTO":
             discount_counter += 1
-            repl[oldc] = f"% DESCUENTO{discount_counter}"[:MAX_CODE_LEN]
+            repl[old_code] = f"% DESCUENTO{discount_counter}"[:MAX_CODE_LEN]
 
     olds_by_base: Dict[str, List[str]] = defaultdict(list)
-    for oldc in targets:
-        base = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
+    for old_code in targets:
+        base = (base_choice.get(old_code) or "").strip() or "SIN_CODIGO"
         if base == "% DESCUENTO":
             continue
-        olds_by_base[base].append(oldc)
+        olds_by_base[base].append(old_code)
 
     suffix_idx: Dict[str, int] = {
-        oldc: 0
-        for oldc in targets
-        if base_choice.get(oldc) != "% DESCUENTO"
+        old_code: 0
+        for old_code in targets
+        if base_choice.get(old_code) != "% DESCUENTO"
     }
 
     for base, olds in olds_by_base.items():
-        adjacency: Dict[str, set[str]] = {oldc: set() for oldc in olds}
+        adjacency: Dict[str, set[str]] = {old_code: set() for old_code in olds}
 
         by_partida: Dict[str, List[str]] = defaultdict(list)
-        for oldc in olds:
-            for partida in partidas_by_old.get(oldc, {"__ROOT__"}):
-                by_partida[partida].append(oldc)
+        for old_code in olds:
+            for partida in partidas_by_old.get(old_code, {"__ROOT__"}):
+                by_partida[partida].append(old_code)
 
         for _partida, codes in by_partida.items():
             if len(codes) <= 1:
@@ -490,33 +542,37 @@ def _build_replacement_map(
                     adjacency[a].add(b)
                     adjacency[b].add(a)
 
-        order = sorted(olds, key=lambda oldc: (len(adjacency[oldc]), oldc), reverse=True)
+        order = sorted(
+            olds,
+            key=lambda old_code: (len(adjacency[old_code]), old_code),
+            reverse=True,
+        )
         colors: Dict[str, int] = {}
 
-        for oldc in order:
-            used = {colors[n] for n in adjacency[oldc] if n in colors}
+        for old_code in order:
+            used = {colors[n] for n in adjacency[old_code] if n in colors}
             color = 0
             while color in used:
                 color += 1
-            colors[oldc] = color
+            colors[old_code] = color
 
-        for oldc, color in colors.items():
-            suffix_idx[oldc] = max(suffix_idx.get(oldc, 0), color)
+        for old_code, color in colors.items():
+            suffix_idx[old_code] = max(suffix_idx.get(old_code, 0), color)
 
-    for oldc in targets:
-        if oldc in repl:
+    for old_code in targets:
+        if old_code in repl:
             continue
-        base = (base_choice.get(oldc) or "").strip() or "SIN_CODIGO"
-        repl[oldc] = _make_code(base, suffix_idx.get(oldc, 0))
+        base = (base_choice.get(old_code) or "").strip() or "SIN_CODIGO"
+        repl[old_code] = _make_code(base, suffix_idx.get(old_code, 0))
 
     rows: List[Tuple[str, str, float, str]] = []
-    for oldc in targets:
+    for old_code in targets:
         rows.append(
             (
-                oldc,
-                repl[oldc],
-                float(conf_choice.get(oldc, 0.0)),
-                str(method_choice.get(oldc, "")),
+                old_code,
+                repl[old_code],
+                float(conf_choice.get(old_code, 0.0)),
+                str(method_choice.get(old_code, "")),
             )
         )
 
@@ -525,11 +581,18 @@ def _build_replacement_map(
 
 def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> None:
     if not repl_map:
-        dst.write_text(src.read_text("latin-1", errors="ignore"), "latin-1", errors="ignore")
+        dst.write_text(
+            src.read_text("latin-1", errors="ignore"),
+            "latin-1",
+            errors="ignore",
+        )
         return
 
-    with src.open("r", encoding="latin-1", errors="ignore") as fin, \
-         dst.open("w", encoding="latin-1", errors="ignore") as fout:
+    with src.open("r", encoding="latin-1", errors="ignore") as fin, dst.open(
+        "w",
+        encoding="latin-1",
+        errors="ignore",
+    ) as fout:
         for raw in fin:
             if raw.startswith("~C|"):
                 try:
@@ -559,13 +622,16 @@ def rewrite_bc3_with_codes(src: Path, dst: Path, repl_map: Dict[str, str]) -> No
                 fout.write(raw)
 
 
-def _write_mapping_csv(rows: List[Tuple[str, str, float, str]], csv_path: Path) -> None:
+def _write_mapping_csv(
+    rows: List[Tuple[str, str, float, str]],
+    csv_path: Path,
+) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, delimiter=";")
         writer.writerow(["old_code", "new_code", "confidence", "method"])
-        for oldc, newc, conf, method in rows:
-            writer.writerow([oldc, newc, f"{conf:.3f}", method])
+        for old_code, new_code, conf, method in rows:
+            writer.writerow([old_code, new_code, f"{conf:.3f}", method])
 
 
 def run_phase2(
@@ -575,11 +641,13 @@ def run_phase2(
     **kwargs,
 ) -> Path:
     """
-    Fase 2: clasifica descompuestos contra el catálogo interno del servicio 2 y sustituye códigos.
+    Fase 2: clasifica descompuestos contra el catálogo interno YAML de la
+    librería del servicio 2 y sustituye códigos.
 
-    Nota:
-    - catalog_xlsx se mantiene solo por compatibilidad retroactiva, pero ya no se usa.
+    `catalog_xlsx` se mantiene solo por compatibilidad retroactiva, pero ya no se usa.
     """
+    _ = catalog_xlsx
+
     if bc3_in is None:
         bc3_in = kwargs.pop("input_bc3", None)
     if bc3_out is None:
@@ -595,7 +663,10 @@ def run_phase2(
         bc3_out = Path(bc3_out)
 
     emit_refcru_xlsx = bool(kwargs.pop("emit_refcru_xlsx", True))
-    refcru_template_xlsx = kwargs.pop("refcru_template_xlsx", None) or kwargs.pop("refcru_template", None)
+    refcru_template_xlsx = kwargs.pop(
+        "refcru_template_xlsx",
+        None,
+    ) or kwargs.pop("refcru_template", None)
     refcru_out = kwargs.pop("refcru_out", None)
 
     if refcru_template_xlsx is None:
@@ -612,7 +683,13 @@ def run_phase2(
         refcru_out = Path(refcru_out)
 
     progress_cb = None
-    for key in ("progress_cb", "on_progress", "progress_callback", "callback", "logger"):
+    for key in (
+        "progress_cb",
+        "on_progress",
+        "progress_callback",
+        "callback",
+        "logger",
+    ):
         if key in kwargs and kwargs[key] is not None:
             progress_cb = kwargs[key]
             break
@@ -641,11 +718,18 @@ def run_phase2(
     if emit_refcru_xlsx:
         if refcru_template_xlsx is None or not refcru_template_xlsx.exists():
             if progress_cb:
-                progress_cb("Aviso: no se encontró plantilla REFCRU. Selecciónala con 'Buscar...'")
+                progress_cb(
+                    "Aviso: no se encontró plantilla REFCRU. Selecciónala con 'Buscar...'"
+                )
         else:
             ref_rows: List[RefCruRow] = []
-            for oldc, newc, _conf, _method in rows:
-                ref_rows.append(make_refcru_row(item_no=newc, reference_no=oldc))
+            for old_code, new_code, _conf, _method in rows:
+                ref_rows.append(
+                    make_refcru_row(
+                        item_no=new_code,
+                        reference_no=old_code,
+                    )
+                )
 
             write_refcru_config_package_xlsx(
                 template_xlsx=refcru_template_xlsx,
@@ -654,6 +738,8 @@ def run_phase2(
             )
 
             if progress_cb:
-                progress_cb(f"OK: generado REFCRU importable en BC: {refcru_out.name}")
+                progress_cb(
+                    f"OK: generado REFCRU importable en BC: {refcru_out.name}"
+                )
 
     return bc3_out

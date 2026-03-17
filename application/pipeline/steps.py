@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from application.pipeline.pipeline import ETLContext, Step
 from application.services.build_tree_service import build_tree
@@ -13,10 +12,10 @@ from infrastructure.bc3.bc3_modifier import convert_to_material
 @dataclass
 class ResolveInputStep(Step):
     def run(self, ctx: ETLContext) -> None:
-        fp = ctx.settings.input_dir / ctx.settings.input_filename
-        if not fp.exists():
-            raise FileNotFoundError(fp)
-        ctx.original_path = fp
+        file_path = ctx.settings.input_dir / ctx.settings.input_filename
+        if not file_path.exists():
+            raise FileNotFoundError(file_path)
+        ctx.original_path = file_path
 
 
 @dataclass
@@ -27,7 +26,6 @@ class TransformBC3Step(Step):
         out_dir.mkdir(parents=True, exist_ok=True)
         mod_file = out_dir / "presupuesto_material.bc3"
 
-        # Intento con firma nueva (parametrizada) y fallback a firma antigua
         try:
             convert_to_material(
                 src=ctx.original_path,
@@ -38,7 +36,6 @@ class TransformBC3Step(Step):
                 encoding=ctx.settings.encoding,
             )
         except TypeError:
-            # Firma antigua: convert_to_material(src, dst)
             convert_to_material(ctx.original_path, mod_file)
 
         ctx.modified_path = mod_file
@@ -49,7 +46,6 @@ class TransformBC3Step(Step):
 class BuildTreeStep(Step):
     def run(self, ctx: ETLContext) -> None:
         assert ctx.modified_path is not None
-        # Intento con firma nueva y fallback a firma antigua
         try:
             roots = build_tree(
                 ctx.modified_path,
@@ -88,7 +84,6 @@ class ExportCsvStep(Step):
     def run(self, ctx: ETLContext) -> None:
         assert ctx.roots is not None
         csv_path = ctx.settings.output_dir / ctx.settings.csv_filename
-        # Intento con separador configurable y fallback
         try:
             export_to_csv(ctx.roots, csv_path, sep=ctx.settings.csv_sep)
         except TypeError:

@@ -1,0 +1,2 @@
+# requirements-build.txt
+pyinstaller>=6.0

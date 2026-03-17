@@ -8,15 +8,25 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Sequence
-
-from infrastructure.clients.bc3_classifier_subprocess_client import (
-    Bc3ClassifierSubprocessClient,
-)
+from typing import Any, Callable, Dict, Iterator, List, Protocol, Sequence
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[int, int, List[Dict[str, Any]], List[Dict[str, Any]]], None]
+ProgressCallback = Callable[
+    [int, int, List[Dict[str, Any]], List[Dict[str, Any]]],
+    None,
+]
+
+
+class Bc3ClassifierClient(Protocol):
+    def classify(
+        self,
+        payload: Dict[str, Any],
+        *,
+        batch_index: int,
+        total_batches: int,
+    ) -> Dict[str, Any]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -30,13 +40,14 @@ class BudgetBc3BatchRequest:
 
 class BudgetBc3BatchService:
     """
-    Servicio 1 -> Servicio 2 por lotes.
+    Servicio 1 -> servicio 2 por lotes.
 
-    El servicio 1 le pasa la lista completa de descompuestos y este servicio la
-    parte en lotes de N para invocar el subprocess del servicio 2.
+    La dependencia externa queda abstraída por un cliente Python, de forma que
+    la GUI ya no conoce si el servicio 2 está implementado como script, API o
+    librería local.
     """
 
-    def __init__(self, bc3_client: Bc3ClassifierSubprocessClient) -> None:
+    def __init__(self, bc3_client: Bc3ClassifierClient) -> None:
         self._bc3_client = bc3_client
 
     def classify_budget(
@@ -111,7 +122,12 @@ class BudgetBc3BatchService:
             )
 
             if progress_callback is not None:
-                progress_callback(batch_index, total_batches, batch_items, batch_results)
+                progress_callback(
+                    batch_index,
+                    total_batches,
+                    batch_items,
+                    batch_results,
+                )
 
         aggregated_results.sort(
             key=lambda item: input_order.get(str(item.get("id") or ""), 10**9)

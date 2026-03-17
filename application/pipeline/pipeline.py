@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Protocol, Optional
+from typing import List, Optional, Protocol
 
-from config.settings import Settings
 from application.services.build_tree_service import Node
+from config.settings import Settings
 
 
 @dataclass
@@ -31,6 +31,6 @@ class Pipeline:
         return self
 
     def run(self, ctx: ETLContext) -> ETLContext:
-        for s in self.steps:
-            s.run(ctx)
+        for step in self.steps:
+            step.run(ctx)
         return ctx

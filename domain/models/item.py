@@ -1,6 +1,9 @@
 # domain/models/item.py
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import List
+
 
 @dataclass
 class Breakdown:
@@ -9,7 +12,8 @@ class Breakdown:
     unit: str
     quantity: float
     price: float
-    breakdown_type: str  # Mano de obra, Material, Maquinaria…
+    breakdown_type: str
+
 
 @dataclass
 class Item:

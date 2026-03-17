@@ -1,8 +1,11 @@
 # application/services/export_csv_service.py
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
+
 from application.services.build_tree_service import Node
 
 
@@ -17,18 +20,20 @@ def _flatten(node: Node, acc: List[Dict[str, Any]]) -> None:
             "precio": node.precio if node.precio is not None else "",
             "cantidad_pres": node.can_pres if node.can_pres is not None else "",
             "importe_pres": node.imp_pres if node.imp_pres is not None else "",
-            "hijos": ",".join(ch.code for ch in node.children) if node.children else "",
+            "hijos": ",".join(child.code for child in node.children)
+            if node.children
+            else "",
             "mediciones": "⏎".join(node.measurements),
         }
     )
-    for ch in node.children:
-        _flatten(ch, acc)
+    for child in node.children:
+        _flatten(child, acc)
 
 
 def export_to_csv(roots: List[Node], csv_path: Path, sep: str = ";") -> None:
     rows: List[Dict[str, Any]] = []
-    for r in roots:
-        _flatten(r, rows)
+    for root in roots:
+        _flatten(root, rows)
 
     df = pd.DataFrame(
         rows,

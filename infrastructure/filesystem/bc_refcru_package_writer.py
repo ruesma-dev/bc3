@@ -1,27 +1,54 @@
-
+# infrastructure/filesystem/bc_refcru_package_writer.py
 from __future__ import annotations
 
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple
-import re
-import zipfile
-import xml.etree.ElementTree as ET
 
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS = {"m": NS_MAIN}
 
 ET.register_namespace("", NS_MAIN)
-ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
-ET.register_namespace("xdr", "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing")
-ET.register_namespace("x14", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main")
-ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
-ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
-ET.register_namespace("xr", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision")
-ET.register_namespace("xr2", "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2")
-ET.register_namespace("xr3", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3")
-ET.register_namespace("xr6", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6")
+ET.register_namespace(
+    "r",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+)
+ET.register_namespace(
+    "xdr",
+    "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+)
+ET.register_namespace(
+    "x14",
+    "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main",
+)
+ET.register_namespace(
+    "mc",
+    "http://schemas.openxmlformats.org/markup-compatibility/2006",
+)
+ET.register_namespace(
+    "x14ac",
+    "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac",
+)
+ET.register_namespace(
+    "xr",
+    "http://schemas.microsoft.com/office/spreadsheetml/2014/revision",
+)
+ET.register_namespace(
+    "xr2",
+    "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2",
+)
+ET.register_namespace(
+    "xr3",
+    "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3",
+)
+ET.register_namespace(
+    "xr6",
+    "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6",
+)
 
 _REF_RE = re.compile(r"^(?P<col>[A-Z]+)(?P<row>\d+)$")
 _RANGE_RE = re.compile(
@@ -78,7 +105,7 @@ def write_refcru_config_package_xlsx(
         "xl/worksheets/sheet1.xml",
         "xl/tables/table1.xml",
     ]
-    missing = [p for p in required if p not in files]
+    missing = [part for part in required if part not in files]
     if missing:
         raise ValueError(
             f"Template inválido para BC Config Package (faltan partes {missing}). "
@@ -102,7 +129,9 @@ def write_refcru_config_package_xlsx(
     def _append_si(text: str) -> int:
         si = ET.Element(f"{{{NS_MAIN}}}si")
         t = ET.SubElement(si, f"{{{NS_MAIN}}}t")
-        if text and (text[0].isspace() or text[-1].isspace() or "  " in text):
+        if text and (
+            text[0].isspace() or text[-1].isspace() or "  " in text
+        ):
             t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
         t.text = text
         ss_root.append(si)
@@ -125,7 +154,9 @@ def write_refcru_config_package_xlsx(
 
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
-        raise ValueError("Template inválido: sheetData no encontrado en xl/worksheets/sheet1.xml")
+        raise ValueError(
+            "Template inválido: sheetData no encontrado en xl/worksheets/sheet1.xml"
+        )
 
     template_row = sheet_data.find(f"m:row[@r='{first_data_row}']", NS)
     template_row_attrib = dict(template_row.attrib) if template_row is not None else {}
@@ -148,9 +179,9 @@ def write_refcru_config_package_xlsx(
 
     new_rows: list[ET.Element] = []
     for offset, ref_row in enumerate(row_list, start=0):
-        rn = first_data_row + offset
+        row_number = first_data_row + offset
         new_row = _build_data_row(
-            row_number=rn,
+            row_number=row_number,
             new_code=ref_row.new_code,
             old_code=ref_row.old_code,
             shared_string_getter=_get_ssi,
@@ -162,7 +193,7 @@ def write_refcru_config_package_xlsx(
         new_rows.append(new_row)
 
     all_rows = preserved_rows + new_rows
-    all_rows.sort(key=lambda r: _get_row_number(r) or 0)
+    all_rows.sort(key=lambda row: _get_row_number(row) or 0)
 
     for row in list(sheet_data):
         sheet_data.remove(row)
@@ -170,7 +201,9 @@ def write_refcru_config_package_xlsx(
         sheet_data.append(row)
 
     new_last_row = first_data_row + len(row_list) - 1 if row_list else header_row
-    new_table_ref = f"{start_col}{header_row}:{end_col}{max(new_last_row, header_row)}"
+    new_table_ref = (
+        f"{start_col}{header_row}:{end_col}{max(new_last_row, header_row)}"
+    )
     table_root.set("ref", new_table_ref)
     auto = table_root.find("m:autoFilter", NS)
     if auto is not None:
@@ -178,7 +211,11 @@ def write_refcru_config_package_xlsx(
 
     dim = sheet_root.find("m:dimension", NS)
     if dim is not None:
-        max_existing_row = max((_get_row_number(r) or 0) for r in all_rows) if all_rows else header_row
+        max_existing_row = (
+            max((_get_row_number(row) or 0) for row in all_rows)
+            if all_rows
+            else header_row
+        )
         dim.set("ref", f"A1:{end_col}{max(max_existing_row, header_row)}")
 
     selection = sheet_root.find("./m:sheetViews/m:sheetView/m:selection", NS)
@@ -332,10 +369,12 @@ def _count_shared_string_refs(files: dict[str, bytes]) -> int:
 
 def _serialize_xml(root: ET.Element, original_xml: bytes) -> bytes:
     serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-    return _inject_missing_root_namespaces(serialized, original_xml)
+    merged = _merge_root_namespaces(serialized, original_xml)
+    ET.fromstring(merged)
+    return merged
 
 
-def _inject_missing_root_namespaces(serialized_xml: bytes, original_xml: bytes) -> bytes:
+def _merge_root_namespaces(serialized_xml: bytes, original_xml: bytes) -> bytes:
     try:
         original_text = original_xml.decode("utf-8")
         serialized_text = serialized_xml.decode("utf-8")
@@ -348,19 +387,37 @@ def _inject_missing_root_namespaces(serialized_xml: bytes, original_xml: bytes) 
         return serialized_xml
 
     original_ns = _XMLNS_RE.findall(original_start)
+    serialized_ns = _XMLNS_RE.findall(serialized_start)
     if not original_ns:
         return serialized_xml
 
-    serialized_decl_names = {name for name, _uri in _XMLNS_RE.findall(serialized_start)}
-    missing_decls = [f'{name}="{uri}"' for name, uri in original_ns if name not in serialized_decl_names]
+    serialized_names = {name for name, _uri in serialized_ns}
+    serialized_uris = {uri for _name, uri in serialized_ns}
+
+    missing_decls = []
+    for name, uri in original_ns:
+        if name in serialized_names:
+            continue
+        if uri in serialized_uris:
+            continue
+        missing_decls.append(f'{name}="{uri}"')
+
     if not missing_decls:
         return serialized_xml
 
-    insert_at = serialized_text.find(">", serialized_text.find("<", serialized_text.find("?>") + 2))
+    insert_at = serialized_text.find(
+        ">",
+        serialized_text.find("<", serialized_text.find("?>") + 2),
+    )
     if insert_at < 0:
         return serialized_xml
 
-    patched = serialized_text[:insert_at] + " " + " ".join(missing_decls) + serialized_text[insert_at:]
+    patched = (
+        serialized_text[:insert_at]
+        + " "
+        + " ".join(missing_decls)
+        + serialized_text[insert_at:]
+    )
     return patched.encode("utf-8")
 
 
@@ -371,7 +428,7 @@ def _extract_root_start_tag(xml_text: str) -> str:
     gt = xml_text.find(">", lt + 1) if lt >= 0 else -1
     if lt < 0 or gt < 0:
         return ""
-    return xml_text[lt:gt + 1]
+    return xml_text[lt : gt + 1]
 
 
 def _local_name(tag: str) -> str:
