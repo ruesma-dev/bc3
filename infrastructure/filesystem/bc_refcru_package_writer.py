@@ -1,4 +1,4 @@
-
+# infrastructure/filesystem/bc_refcru_package_writer.py
 from __future__ import annotations
 
 from copy import deepcopy
@@ -13,21 +13,49 @@ NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS = {"m": NS_MAIN}
 
 ET.register_namespace("", NS_MAIN)
-ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
-ET.register_namespace("xdr", "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing")
-ET.register_namespace("x14", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main")
-ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
-ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
-ET.register_namespace("xr", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision")
-ET.register_namespace("xr2", "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2")
-ET.register_namespace("xr3", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3")
-ET.register_namespace("xr6", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6")
+ET.register_namespace(
+    "r",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+)
+ET.register_namespace(
+    "xdr",
+    "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+)
+ET.register_namespace(
+    "x14",
+    "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main",
+)
+ET.register_namespace(
+    "mc",
+    "http://schemas.openxmlformats.org/markup-compatibility/2006",
+)
+ET.register_namespace(
+    "x14ac",
+    "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac",
+)
+ET.register_namespace(
+    "xr",
+    "http://schemas.microsoft.com/office/spreadsheetml/2014/revision",
+)
+ET.register_namespace(
+    "xr2",
+    "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2",
+)
+ET.register_namespace(
+    "xr3",
+    "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3",
+)
+ET.register_namespace(
+    "xr6",
+    "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6",
+)
 
 _REF_RE = re.compile(r"^(?P<col>[A-Z]+)(?P<row>\d+)$")
 _RANGE_RE = re.compile(
     r"^(?P<start_col>[A-Z]+)(?P<start_row>\d+):(?P<end_col>[A-Z]+)(?P<end_row>\d+)$"
 )
 _XMLNS_RE = re.compile(r'\s(xmlns(?::[A-Za-z_][\w.-]*)?)="([^"]*)"')
+_XML_DECL_RE = re.compile(r"^\s*(<\?xml[^>]+\?>)\s*", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -62,7 +90,8 @@ def write_refcru_config_package_xlsx(
         output_xlsx = out_xlsx
     if output_xlsx is None:
         raise TypeError(
-            "write_refcru_config_package_xlsx: falta 'output_xlsx' (o alias 'out_xlsx')."
+            "write_refcru_config_package_xlsx: falta 'output_xlsx' "
+            "(o alias 'out_xlsx')."
         )
 
     output_xlsx = Path(output_xlsx)
@@ -78,7 +107,7 @@ def write_refcru_config_package_xlsx(
         "xl/worksheets/sheet1.xml",
         "xl/tables/table1.xml",
     ]
-    missing = [p for p in required if p not in files]
+    missing = [path for path in required if path not in files]
     if missing:
         raise ValueError(
             f"Template inválido para BC Config Package (faltan partes {missing}). "
@@ -102,8 +131,13 @@ def write_refcru_config_package_xlsx(
     def _append_si(text: str) -> int:
         si = ET.Element(f"{{{NS_MAIN}}}si")
         t = ET.SubElement(si, f"{{{NS_MAIN}}}t")
-        if text and (text[0].isspace() or text[-1].isspace() or "  " in text):
-            t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        if text and (
+            text[0].isspace() or text[-1].isspace() or "  " in text
+        ):
+            t.set(
+                "{http://www.w3.org/XML/1998/namespace}space",
+                "preserve",
+            )
         t.text = text
         ss_root.append(si)
         idx = len(ss_index)
@@ -118,14 +152,19 @@ def write_refcru_config_package_xlsx(
 
     table_ref = table_root.get("ref")
     if not table_ref:
-        raise ValueError("Template inválido: table1.xml no contiene atributo 'ref'.")
+        raise ValueError(
+            "Template inválido: table1.xml no contiene atributo 'ref'."
+        )
 
     start_col, header_row, end_col, current_last_row = _parse_range_ref(table_ref)
     first_data_row = header_row + 1
 
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
-        raise ValueError("Template inválido: sheetData no encontrado en xl/worksheets/sheet1.xml")
+        raise ValueError(
+            "Template inválido: sheetData no encontrado en "
+            "xl/worksheets/sheet1.xml"
+        )
 
     template_row = sheet_data.find(f"m:row[@r='{first_data_row}']", NS)
     template_row_attrib = dict(template_row.attrib) if template_row is not None else {}
@@ -148,9 +187,9 @@ def write_refcru_config_package_xlsx(
 
     new_rows: list[ET.Element] = []
     for offset, ref_row in enumerate(row_list, start=0):
-        rn = first_data_row + offset
+        row_number = first_data_row + offset
         new_row = _build_data_row(
-            row_number=rn,
+            row_number=row_number,
             new_code=ref_row.new_code,
             old_code=ref_row.old_code,
             shared_string_getter=_get_ssi,
@@ -162,7 +201,7 @@ def write_refcru_config_package_xlsx(
         new_rows.append(new_row)
 
     all_rows = preserved_rows + new_rows
-    all_rows.sort(key=lambda r: _get_row_number(r) or 0)
+    all_rows.sort(key=lambda row: _get_row_number(row) or 0)
 
     for row in list(sheet_data):
         sheet_data.remove(row)
@@ -172,33 +211,64 @@ def write_refcru_config_package_xlsx(
     new_last_row = first_data_row + len(row_list) - 1 if row_list else header_row
     new_table_ref = f"{start_col}{header_row}:{end_col}{max(new_last_row, header_row)}"
     table_root.set("ref", new_table_ref)
-    auto = table_root.find("m:autoFilter", NS)
-    if auto is not None:
-        auto.set("ref", new_table_ref)
 
-    dim = sheet_root.find("m:dimension", NS)
-    if dim is not None:
-        max_existing_row = max((_get_row_number(r) or 0) for r in all_rows) if all_rows else header_row
-        dim.set("ref", f"A1:{end_col}{max(max_existing_row, header_row)}")
+    auto_filter = table_root.find("m:autoFilter", NS)
+    if auto_filter is not None:
+        auto_filter.set("ref", new_table_ref)
+
+    dimension = sheet_root.find("m:dimension", NS)
+    if dimension is not None:
+        max_existing_row = (
+            max((_get_row_number(row) or 0) for row in all_rows)
+            if all_rows
+            else header_row
+        )
+        dimension.set(
+            "ref",
+            f"A1:{end_col}{max(max_existing_row, header_row)}",
+        )
 
     selection = sheet_root.find("./m:sheetViews/m:sheetView/m:selection", NS)
     if selection is not None:
-        active_ref = f"A{first_data_row}" if row_list else f"A{header_row}"
-        selection.set("activeCell", active_ref)
-        selection.set("sqref", new_table_ref)
+        if row_list:
+            selection_ref = (
+                f"{start_col}{first_data_row}:{end_col}"
+                f"{max(new_last_row, first_data_row)}"
+            )
+            selection.set("activeCell", f"{start_col}{first_data_row}")
+            selection.set("sqref", selection_ref)
+        else:
+            selection.set("activeCell", f"{start_col}{header_row}")
+            selection.set("sqref", f"{start_col}{header_row}")
 
-    files["xl/sharedStrings.xml"] = _serialize_xml(ss_root, original_shared_strings)
-    files["xl/worksheets/sheet1.xml"] = _serialize_xml(sheet_root, original_sheet_xml)
-    files["xl/tables/table1.xml"] = _serialize_xml(table_root, original_table_xml)
+    files["xl/sharedStrings.xml"] = _serialize_xml(
+        ss_root,
+        original_shared_strings,
+    )
+    files["xl/worksheets/sheet1.xml"] = _serialize_sheet_xml_preserving_root(
+        original_sheet_xml,
+        sheet_root,
+    )
+    files["xl/tables/table1.xml"] = _serialize_xml(
+        table_root,
+        original_table_xml,
+    )
 
     total_shared_string_refs = _count_shared_string_refs(files)
     total_unique_strings = len(ss_root.findall("m:si", NS))
     ss_root.set("count", str(total_shared_string_refs))
     ss_root.set("uniqueCount", str(total_unique_strings))
-    files["xl/sharedStrings.xml"] = _serialize_xml(ss_root, original_shared_strings)
+    files["xl/sharedStrings.xml"] = _serialize_xml(
+        ss_root,
+        original_shared_strings,
+    )
 
     output_xlsx.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(output_xlsx, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+    with zipfile.ZipFile(
+        output_xlsx,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as zout:
         for name in names:
             zout.writestr(name, files[name])
 
@@ -224,7 +294,10 @@ def _build_data_row(
     else:
         row_el = ET.Element(f"{{{NS_MAIN}}}row")
         row_el.set("r", str(row_number))
-        row_el.set("spans", f"{_col_to_index(start_col)}:{_col_to_index(end_col)}")
+        row_el.set(
+            "spans",
+            f"{_col_to_index(start_col)}:{_col_to_index(end_col)}",
+        )
 
     template_cells_by_col = _cells_by_col(template_row) if template_row is not None else {}
     row_cells_by_col = _cells_by_col(row_el)
@@ -240,13 +313,22 @@ def _build_data_row(
     for col, cell in list(row_cells_by_col.items()):
         cell.set("r", f"{col}{row_number}")
         if col == "A":
-            _set_cell_shared_string(cell, shared_string_getter(str(new_code or "")))
+            _set_cell_shared_string(
+                cell,
+                shared_string_getter(str(new_code or "")),
+            )
         elif col == "F":
-            _set_cell_shared_string(cell, shared_string_getter(str(old_code or "")))
+            _set_cell_shared_string(
+                cell,
+                shared_string_getter(str(old_code or "")),
+            )
         else:
             _blank_cell(cell)
 
-    _rebuild_row_cell_order(row_el=row_el, cells_by_col=row_cells_by_col)
+    _rebuild_row_cell_order(
+        row_el=row_el,
+        cells_by_col=row_cells_by_col,
+    )
     return row_el
 
 
@@ -275,7 +357,10 @@ def _rebuild_row_cell_order(
     row_el: ET.Element,
     cells_by_col: dict[str, ET.Element],
 ) -> None:
-    non_cells = [child for child in list(row_el) if _local_name(child.tag) != "c"]
+    non_cells = [
+        child for child in list(row_el)
+        if _local_name(child.tag) != "c"
+    ]
     for child in list(row_el):
         row_el.remove(child)
 
@@ -331,11 +416,59 @@ def _count_shared_string_refs(files: dict[str, bytes]) -> int:
 
 
 def _serialize_xml(root: ET.Element, original_xml: bytes) -> bytes:
-    serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    serialized = ET.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
     return _inject_missing_root_namespaces(serialized, original_xml)
 
 
-def _inject_missing_root_namespaces(serialized_xml: bytes, original_xml: bytes) -> bytes:
+def _serialize_sheet_xml_preserving_root(
+    original_xml: bytes,
+    root: ET.Element,
+) -> bytes:
+    """
+    Serializa `sheet1.xml` preservando EXACTAMENTE la declaración XML y el
+    start-tag original del worksheet del template.
+
+    Esto evita que Excel repare la hoja cuando el template exportado por
+    Business Central es sensible al encabezado/namespaces del nodo raíz.
+    """
+    serialized = ET.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
+
+    try:
+        original_text = original_xml.decode("utf-8")
+        serialized_text = serialized.decode("utf-8")
+    except Exception:
+        return _serialize_xml(root, original_xml)
+
+    original_decl = _extract_xml_declaration(original_text)
+    if not original_decl:
+        original_decl = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+
+    original_start = _extract_root_start_tag(original_text)
+    serialized_start = _extract_root_start_tag(serialized_text)
+
+    if not original_start or not serialized_start:
+        return _serialize_xml(root, original_xml)
+
+    serialized_body = _strip_xml_declaration(serialized_text).lstrip()
+    if not serialized_body.startswith(serialized_start):
+        return _serialize_xml(root, original_xml)
+
+    patched_body = original_start + serialized_body[len(serialized_start):]
+    return (original_decl + "\n" + patched_body).encode("utf-8")
+
+
+def _inject_missing_root_namespaces(
+    serialized_xml: bytes,
+    original_xml: bytes,
+) -> bytes:
     try:
         original_text = original_xml.decode("utf-8")
         serialized_text = serialized_xml.decode("utf-8")
@@ -351,27 +484,51 @@ def _inject_missing_root_namespaces(serialized_xml: bytes, original_xml: bytes) 
     if not original_ns:
         return serialized_xml
 
-    serialized_decl_names = {name for name, _uri in _XMLNS_RE.findall(serialized_start)}
-    missing_decls = [f'{name}="{uri}"' for name, uri in original_ns if name not in serialized_decl_names]
+    serialized_decl_names = {
+        name for name, _uri in _XMLNS_RE.findall(serialized_start)
+    }
+    missing_decls = [
+        f'{name}="{uri}"'
+        for name, uri in original_ns
+        if name not in serialized_decl_names
+    ]
     if not missing_decls:
         return serialized_xml
 
-    insert_at = serialized_text.find(">", serialized_text.find("<", serialized_text.find("?>") + 2))
+    insert_at = serialized_text.find(
+        ">",
+        serialized_text.find("<", serialized_text.find("?>") + 2),
+    )
     if insert_at < 0:
         return serialized_xml
 
-    patched = serialized_text[:insert_at] + " " + " ".join(missing_decls) + serialized_text[insert_at:]
+    patched = (
+        serialized_text[:insert_at]
+        + " "
+        + " ".join(missing_decls)
+        + serialized_text[insert_at:]
+    )
     return patched.encode("utf-8")
 
 
+def _extract_xml_declaration(xml_text: str) -> str:
+    match = _XML_DECL_RE.match(xml_text)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def _strip_xml_declaration(xml_text: str) -> str:
+    return _XML_DECL_RE.sub("", xml_text, count=1)
+
+
 def _extract_root_start_tag(xml_text: str) -> str:
-    start = xml_text.find("?>")
-    search_from = start + 2 if start >= 0 else 0
-    lt = xml_text.find("<", search_from)
-    gt = xml_text.find(">", lt + 1) if lt >= 0 else -1
+    body = _strip_xml_declaration(xml_text).lstrip()
+    lt = body.find("<")
+    gt = body.find(">", lt + 1) if lt >= 0 else -1
     if lt < 0 or gt < 0:
         return ""
-    return xml_text[lt:gt + 1]
+    return body[lt:gt + 1]
 
 
 def _local_name(tag: str) -> str:

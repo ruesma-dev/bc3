@@ -18,8 +18,8 @@ from domain.bc3.records import (
     DescomposicionRecord,
     MedicionesRecord,
 )
-from infrastructure.clients.bc3_classifier_subprocess_client import (
-    Bc3ClassifierSubprocessClient,
+from infrastructure.clients.bc3_classifier_library_client import (
+    Bc3ClassifierLibraryClient,
 )
 from infrastructure.filesystem.bc_refcru_package_writer import (
     RefCruRow,
@@ -400,7 +400,7 @@ def _build_replacement_map(
 
     if batch_items:
         batch_service = BudgetBc3BatchService(
-            bc3_client=Bc3ClassifierSubprocessClient.from_env(),
+            bc3_client=Bc3ClassifierLibraryClient.from_env(),
         )
         prompt_key = (os.getenv("BC3_CLASSIFY_PROMPT_KEY") or "bc3_clasificador_es").strip()
 
@@ -421,18 +421,18 @@ def _build_replacement_map(
                 result_item = results_by_id.get(oldc)
                 if result_item is None:
                     raise RuntimeError(
-                        f"El servicio BC3 no devolvió resultado para id={oldc}"
+                        f"La librería BC3 no devolvió resultado para id={oldc}"
                     )
 
                 best_code, conf01 = _extract_best_code_from_result(result_item)
                 if not best_code:
                     raise RuntimeError(
-                        f"El servicio BC3 devolvió codigo_interno vacío para id={oldc}"
+                        f"La librería BC3 devolvió codigo_interno vacío para id={oldc}"
                     )
 
                 base_choice[oldc] = best_code
                 conf_choice[oldc] = conf01
-                method_choice[oldc] = "ocr_service_batch"
+                method_choice[oldc] = "library_batch"
 
                 if progress_cb:
                     progress_cb(

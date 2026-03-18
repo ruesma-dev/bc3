@@ -15,11 +15,14 @@ from application.services.build_tree_service import build_tree
 from application.services.export_csv_service import export_to_csv
 from infrastructure.bc3.bc3_modifier import convert_to_material
 
+_PHASE2_IMPORT_ERROR: Optional[Exception] = None
+
 try:
     from application.services.phase2_code_mapper import run_phase2  # type: ignore
     HAS_PHASE2 = True
-except Exception:
+except Exception as exc:
     HAS_PHASE2 = False
+    _PHASE2_IMPORT_ERROR = exc
 
 APP_VERSION = "1.100 catálogo YAML interno"
 APP_TITLE = "Limpieza de BC3"
@@ -119,6 +122,13 @@ class App(tk.Tk):
 
         self._apply_model_env()
         self._auto_load_refcru_template()
+
+        if _PHASE2_IMPORT_ERROR is not None:
+            self._append(
+                "ERROR importando Fase 2: "
+                f"{type(_PHASE2_IMPORT_ERROR).__name__}: {_PHASE2_IMPORT_ERROR}",
+                tag="err",
+            )
 
     def _init_styles(self) -> None:
         self.style = ttk.Style(self)
@@ -413,6 +423,17 @@ class App(tk.Tk):
         threading.Thread(target=self._run_clean_thread, daemon=True).start()
 
     def _run_phase2_clicked(self) -> None:
+        if not HAS_PHASE2:
+            detail = ""
+            if _PHASE2_IMPORT_ERROR is not None:
+                detail = f"\n\nDetalle real:\n{type(_PHASE2_IMPORT_ERROR).__name__}: {_PHASE2_IMPORT_ERROR}"
+            messagebox.showerror(
+                "Fase 2 (IA)",
+                "La Fase 2 no está disponible porque ha fallado su importación."
+                + detail,
+            )
+            return
+
         if not self._ensure_input():
             return
 
