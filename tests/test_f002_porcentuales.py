@@ -331,28 +331,108 @@ def test_f002_r6_los_precios_de_clon_de_43_15_son_12_35_12_35_y_7_41(tmp_path):
     assert _registro(lineas, "~C|43.15.P3|").split("|")[4] == "7.41"
 
 
-def test_f002_r9_los_cuatro_descompuestos_solo_porcentuales_toman_el_precio_del_padre(tmp_path):
+def test_f002_r9_los_cuatro_solo_porcentuales_reconstruyen_su_base(tmp_path):
+    """R9 nueva: `base = P / Π(1 + r_i)` y una línea `.P0` delante.
+
+    El precio del `~C` del padre YA trae los porcentajes dentro. La regla
+    anterior se lo daba al primer clon y volvía a aplicar los siguientes, que
+    es como `ICV260` acababa en 336,39 en vez de 291,50.
+    """
     lineas, informe, _ = _convertir(tmp_path, "f002_solo_pct.bc3")
     esperado = {
-        "31.04.03.01.P1": "1100.00",
-        "32.03.04.32.P1": "1117.65",
-        "ICV260.P1": "291.50",
-        "ICV270.P1": "369.50",
+        "31.04.03.01.P0": "1073.17", "31.04.03.01.P1": "26.83",
+        "32.03.04.32.P0": "955.26", "32.03.04.32.P1": "162.39",
+        "ICV260.P0": "225.98", "ICV260.P1": "26.62", "ICV260.P2": "38.90",
+        "ICV270.P0": "286.45", "ICV270.P1": "33.74", "ICV270.P2": "49.31",
     }
     for codigo, precio in esperado.items():
-        assert _registro(lineas, f"~C|{codigo}|").split("|")[4] == precio
-    # Las porcentuales siguientes se aplican sobre ese precio.
-    assert _registro(lineas, "~C|ICV260.P2|").split("|")[4] == "44.89"
-    assert _registro(lineas, "~C|ICV270.P2|").split("|")[4] == "56.90"
-    padres = {c.padre for c in informe.casos if c.motivo == "precio_del_padre_aplicado"}
+        assert _registro(lineas, f"~C|{codigo}|").split("|")[4] == precio, codigo
+    padres = {c.padre for c in informe.casos if c.motivo == "base_reconstruida"}
     assert padres == {"31.04.03.01", "32.03.04.32", "ICV260", "ICV270"}
+
+
+def test_f002_r9_la_linea_de_base_va_delante_y_es_una_linea_normal(tmp_path):
+    """`.P0` encabeza el `~D` con factor 1 y rendimiento 1, unidad UD y tipo 3."""
+    lineas, _, _ = _convertir(tmp_path, "f002_solo_pct_doble.bc3")
+    assert _registro(lineas, "~D|ICV260|") == (
+        "~D|ICV260|ICV260.P0\\1\\1\\ICV260.P1\\1\\1\\ICV260.P2\\1\\1\\|"
+    )
+    campos = _registro(lineas, "~C|ICV260.P0|").split("|")
+    assert campos[2] == "UD"
+    assert campos[3] == "Regulador de caudal de aire constante RCR-05, 400x200"
+    assert campos[4] == "225.98"
+    assert campos[5] == "150626"
+    assert campos[6] == "3"
+    # Y ya no queda ningún concepto % en el descompuesto.
+    assert "%%" not in _registro(lineas, "~D|ICV260|")
+
+
+def _suma_de_la_familia(lineas: list[str], padre: str) -> Decimal:
+    """Suma de los precios de `<padre>.P0`, `.P1`, ... en la salida."""
+    prefijos = (f"~C|{padre}.P",)
+    return sum(
+        (Decimal(l.split("|")[4] or "0") for l in lineas if l.startswith(prefijos)),
+        Decimal(0),
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture, padre, precio",
+    [
+        ("f002_solo_pct.bc3", "31.04.03.01", "1100.00"),
+        ("f002_solo_pct.bc3", "32.03.04.32", "1117.65"),
+        ("f002_solo_pct_doble.bc3", "ICV260", "291.50"),
+        ("f002_solo_pct_doble.bc3", "ICV270", "369.50"),
+    ],
+)
+def test_f002_r9bis_la_suma_del_descompuesto_es_exactamente_el_precio_del_padre(
+    fixture, padre, precio, tmp_path
+):
+    lineas, _, _ = _convertir(tmp_path, fixture)
+    assert _suma_de_la_familia(lineas, padre) == Decimal(precio)
+
+
+def test_f002_r9bis_el_residuo_se_absorbe_en_la_linea_de_base(tmp_path):
+    """P = 10,00 y r = 0,15: base 8,70 y 15 % 1,31, que suman 10,01.
+
+    El céntimo sobrante se le quita a la línea de base (8,69), nunca a la
+    porcentual: la porcentual tiene que seguir siendo `0,15 × 8,70` leído en el
+    propio fichero.
+    """
+    entrada = tmp_path / "residuo.bc3"
+    entrada.write_bytes(
+        ("~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||\r\n"
+         "~C|09.21.01|ud|PARTIDA CON RESIDUO|10|200220|0|\r\n"
+         "~C|%QUINCE||RECARGO DEL 15|15|200220|0|\r\n"
+         "~D|09.21.01|%QUINCE\\1\\0.15\\|\r\n").encode("latin-1")
+    )
+    salida = tmp_path / "salida.bc3"
+    convertir_porcentuales(entrada, salida)
+    lineas = leer(salida)
+    assert _registro(lineas, "~C|09.21.01.P1|").split("|")[4] == "1.31"
+    assert _registro(lineas, "~C|09.21.01.P0|").split("|")[4] == "8.69"
+    assert _suma_de_la_familia(lineas, "09.21.01") == Decimal("10.00")
+
+
+def test_f002_r9ter_si_el_descuento_se_come_la_base_el_descompuesto_no_se_toca(tmp_path):
+    """`(1 + r) ≤ 0`: la base no se puede despejar, así que no se convierte."""
+    lineas, informe, _ = _convertir(tmp_path, "f002_descuento_total.bc3")
+    assert informe.lineas_convertidas == 0
+    assert _registro(lineas, "~D|09.20.01|") == "~D|09.20.01|%TODO\\1\\-1\\|"
+    assert _registro(lineas, "~D|09.20.02|") == "~D|09.20.02|%MAS\\1\\-1.5\\|"
+    # Los conceptos % siguen vivos porque siguen referenciados (R14).
+    assert _registro(lineas, "~C|%TODO|")
+    assert _registro(lineas, "~C|%MAS|")
+    casos = [(c.padre, c.codigo, c.rendimiento) for c in informe.casos
+             if c.motivo == "base_no_despejable"]
+    assert casos == [("09.20.01", "%TODO", -1.0), ("09.20.02", "%MAS", -1.5)]
 
 
 def test_f002_r10_base_cero_con_una_linea_normal_detras_da_precio_cero(tmp_path):
     lineas, informe, _ = _convertir(tmp_path, "f002_ceros.bc3")
     assert _registro(lineas, "~C|07.02.05.P1|").split("|")[4] == "0"
     # R9 no aplica: el ~D tiene líneas no porcentuales.
-    assert not [c for c in informe.casos if c.motivo == "precio_del_padre_aplicado"]
+    assert not [c for c in informe.casos if c.motivo == "base_reconstruida"]
 
 
 def test_f002_r12_el_porcentual_con_rendimiento_cero_se_convierte_con_precio_cero(tmp_path):
@@ -518,12 +598,12 @@ def test_f002_r13_un_porcentual_declarado_a_medias_y_sin_uso_tambien_se_borra(tm
     assert not [l for l in leer(salida) if l.startswith("~C|%SOLO")]
 
 
-def test_f002_r9_el_log_dice_que_concepto_recibe_el_precio_del_padre(tmp_path, caplog):
+def test_f002_r9_el_log_dice_de_que_precio_sale_la_base(tmp_path, caplog):
     """Quien lea el log tiene que poder auditar el caso más delicado (D3)."""
     with caplog.at_level("INFO", logger="infrastructure.bc3.bc3_porcentajes"):
         convertir_porcentuales(FIXTURES / "f002_solo_pct.bc3", tmp_path / "s.bc3")
     mensajes = [r.getMessage() for r in caplog.records]
-    assert any("ICV260" in m and "%%jefedeobrayencayGF4%" in m and "291.50" in m
+    assert any("ICV260" in m and "225.98" in m and "291.5" in m
                for m in mensajes), mensajes
 
 
@@ -720,9 +800,11 @@ def test_f002_r6_la_base_acumula_el_importe_YA_redondeado(tmp_path):
     assert _registro(lineas, "~C|09.15.01.P2|").split("|")[4] == "56.18"
 
 
-def test_f002_r9_el_rendimiento_cero_de_la_primera_linea_se_anota_como_cero(tmp_path):
-    """R9 con la primera porcentual a rendimiento 0: el clon cobra igual el
-    precio del padre, y el informe anota el rendimiento tal cual era."""
+def test_f002_r9_un_rendimiento_cero_no_estorba_a_la_base(tmp_path):
+    """`1 + 0 = 1`: la línea a rendimiento 0 no divide, y su clon vale 0.
+
+    P = 50 y Π = 1,1 ⇒ base 45,45; el 10 % da 4,55 y la suma vuelve a ser 50.
+    """
     entrada = tmp_path / "r9_cero.bc3"
     entrada.write_bytes(
         ("~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||\r\n"
@@ -734,11 +816,12 @@ def test_f002_r9_el_rendimiento_cero_de_la_primera_linea_se_anota_como_cero(tmp_
     salida = tmp_path / "salida.bc3"
     informe = convertir_porcentuales(entrada, salida)
     lineas = leer(salida)
-    assert _registro(lineas, "~C|09.14.01.P1|").split("|")[4] == "50.00"
-    assert _registro(lineas, "~C|09.14.01.P2|").split("|")[4] == "5.00"
-    casos = [c for c in informe.casos if c.motivo == "precio_del_padre_aplicado"]
-    assert [(c.codigo, c.rendimiento, c.importe) for c in casos] == [
-        ("%CERO", 0.0, 50.0)
+    assert _registro(lineas, "~C|09.14.01.P0|").split("|")[4] == "45.45"
+    assert _registro(lineas, "~C|09.14.01.P1|").split("|")[4] == "0"
+    assert _registro(lineas, "~C|09.14.01.P2|").split("|")[4] == "4.55"
+    casos = [c for c in informe.casos if c.motivo == "base_reconstruida"]
+    assert [(c.padre, c.codigo, c.importe) for c in casos] == [
+        ("09.14.01", "09.14.01.P0", 45.45)
     ]
 
 
@@ -753,9 +836,11 @@ def test_f002_r9_el_precio_del_padre_se_busca_con_la_marca_de_capitulo_y_sin_ell
     )
     salida = tmp_path / "salida.bc3"
     informe = convertir_porcentuales(entrada, salida)
-    assert _registro(leer(salida), "~C|33.04.01.P1|").split("|")[4] == "100.00"
+    lineas = leer(salida)
+    assert _registro(lineas, "~C|33.04.01.P0|").split("|")[4] == "97.09"
+    assert _registro(lineas, "~C|33.04.01.P1|").split("|")[4] == "2.91"
     assert [c.padre for c in informe.casos
-            if c.motivo == "precio_del_padre_aplicado"] == ["33.04.01#"]
+            if c.motivo == "base_reconstruida"] == ["33.04.01#"]
 
 
 def test_f002_r9_no_aplica_si_el_padre_no_tiene_precio(tmp_path):
@@ -769,8 +854,10 @@ def test_f002_r9_no_aplica_si_el_padre_no_tiene_precio(tmp_path):
     )
     salida = tmp_path / "salida.bc3"
     informe = convertir_porcentuales(entrada, salida)
-    assert _registro(leer(salida), "~C|09.04.01.P1|").split("|")[4] == "0"
-    assert not [c for c in informe.casos if c.motivo == "precio_del_padre_aplicado"]
+    lineas = leer(salida)
+    assert _registro(lineas, "~C|09.04.01.P1|").split("|")[4] == "0"
+    assert not [l for l in lineas if l.startswith("~C|09.04.01.P0|")]
+    assert not [c for c in informe.casos if c.motivo == "base_reconstruida"]
 
 
 def test_f002_r18_las_lineas_no_afectadas_salen_identicas_byte_a_byte(tmp_path):
@@ -839,7 +926,7 @@ def test_f002_r22_el_cli_escribe_el_informe_para_excel(tmp_path):
     assert "lineas_convertidas;6" in texto
     assert "descompuestos_con_porcentual;4" in texto
     assert "padre;codigo;motivo;rendimiento;importe" in texto
-    assert "31.04.03.01;%SUB2.5;precio_del_padre_aplicado;0,025;1100,0" in texto
+    assert "31.04.03.01;31.04.03.01.P0;base_reconstruida;1,025;1073,17" in texto
     filas = texto.split("padre;codigo;motivo;rendimiento;importe")[1].strip()
     for fila in filas.splitlines():
         rendimiento, importe = fila.split(";")[3:5]

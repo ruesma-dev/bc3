@@ -7,9 +7,9 @@ con su propio descompuesto (`170100`, `1701010`, `07.02.01a`; ver
 `progress/explore_porcentuales.md` §2b) y eso haría fallar la suite por un dato
 que ya venía torcido.
 
-Quedan fuera los `~D` cuyas líneas son TODAS porcentuales: ahí R9 cambia el
-importe a propósito (el clon toma el precio del padre) y el informe los lista
-uno a uno.
+Quedan fuera los `~D` cuyas líneas son TODAS porcentuales: ahí R9 reconstruye
+la base a propósito y el informe los lista uno a uno. A esos se les exige, en
+cambio, R19 bis: el importe de su SALIDA vuelve a dar el precio del padre.
 
 Sin red, sin BBDD y sin servicios de IA. Los ficheros de `input/` se leen en
 modo lectura y la salida se escribe siempre en el `tmp_path` del test.
@@ -33,13 +33,19 @@ from infrastructure.bc3.bc3_porcentajes import (
 FIXTURES = Path(__file__).parent / "fixtures"
 ENTRADAS = Path(__file__).resolve().parents[1] / "input"
 
-# R9: los cuatro descompuestos solo-porcentuales reales, con el precio que su
-# ~C trae puesto a mano y que el clon de su primera línea hereda.
+# R9: los cuatro descompuestos solo-porcentuales reales de `input/`, con el
+# precio `P` que su `~C` trae puesto a mano. Tras la conversión, el importe
+# calculado sobre la SALIDA tiene que volver a dar exactamente ese `P`
+# (R19 bis): el precio del padre YA lleva los porcentajes dentro.
 SOLO_PORCENTUALES = {
     "31.04.03.01": Decimal("1100.00"),
     "32.03.04.32": Decimal("1117.65"),
     "ICV260": Decimal("291.50"),
     "ICV270": Decimal("369.50"),
+}
+FICHEROS_SOLO_PCT = {
+    "COSTE_250128_Siroco_Rv4mlo.bc3": ("31.04.03.01", "32.03.04.32"),
+    "lagunamodificado16julio.bc3": ("ICV260", "ICV270"),
 }
 
 
@@ -123,14 +129,16 @@ def test_f002_r19_el_importe_de_cada_descompuesto_se_conserva(fixture, tmp_path)
 
 
 def test_f002_r19_los_descompuestos_solo_porcentuales_se_listan_en_el_informe(tmp_path):
+    """R9 los cambia a propósito, así que el informe los tiene que nombrar."""
     informe = convertir_porcentuales(
         FIXTURES / "f002_solo_pct.bc3", tmp_path / "salida.bc3"
     )
-    casos = {c.padre: c for c in informe.casos
-             if c.motivo == "precio_del_padre_aplicado"}
+    casos = {c.padre: c for c in informe.casos if c.motivo == "base_reconstruida"}
     assert set(casos) == set(SOLO_PORCENTUALES)
-    for padre, precio in SOLO_PORCENTUALES.items():
-        assert Decimal(str(casos[padre].importe)) == precio
+    bases = {"31.04.03.01": Decimal("1073.17"), "32.03.04.32": Decimal("955.26"),
+             "ICV260": Decimal("225.98"), "ICV270": Decimal("286.45")}
+    for padre, base in bases.items():
+        assert Decimal(str(casos[padre].importe)) == base
 
 
 def test_f002_r19_permutar_dos_tripletas_del_descompuesto_cambia_el_resultado():
@@ -220,7 +228,7 @@ def test_f002_r17_en_input_los_codigos_de_los_d_reescritos_existen(nombre, tmp_p
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
-def test_f002_r9_los_cuatro_casos_reales_de_input_reciben_el_precio_del_padre(tmp_path):
+def test_f002_r9_los_cuatro_casos_reales_de_input_reconstruyen_su_base(tmp_path):
     """Siroco aporta dos y lagunamodificado16julio los otros dos."""
     esperado = {
         "COSTE_250128_Siroco_Rv4mlo.bc3": {"31.04.03.01", "32.03.04.32"},
@@ -231,11 +239,46 @@ def test_f002_r9_los_cuatro_casos_reales_de_input_reciben_el_precio_del_padre(tm
         if not origen.exists():
             pytest.skip(f"falta {nombre} en input/")
         informe = convertir_porcentuales(origen, tmp_path / nombre)
-        casos = {c.padre for c in informe.casos
-                 if c.motivo == "precio_del_padre_aplicado"}
+        casos = {c.padre for c in informe.casos if c.motivo == "base_reconstruida"}
         assert padres <= casos, f"{nombre}: faltan {padres - casos}"
         salida = _lineas(tmp_path / nombre)
         for padre in padres:
-            clon = [l for l in salida if l.startswith(f"~C|{padre}.P1|")]
-            assert clon, f"{nombre}: no hay clon de {padre}"
-            assert Decimal(_campos(clon[0])[4]) == SOLO_PORCENTUALES[padre]
+            # La familia entera: la línea de base .P0 y al menos una porcentual.
+            base = [l for l in salida if l.startswith(f"~C|{padre}.P0|")]
+            assert base, f"{nombre}: no hay línea de base de {padre}"
+            assert [l for l in salida if l.startswith(f"~C|{padre}.P1|")]
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("nombre", sorted(FICHEROS_SOLO_PCT))
+def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
+    nombre, tmp_path
+):
+    """R19 bis · lo único que caza el defecto de la R9 anterior.
+
+    Un `~D` solo-porcentual no se puede comparar entrada-contra-salida: su
+    entrada calcula 0. Lo que sí se puede exigir es que el importe calculado
+    sobre la SALIDA vuelva a dar el precio `P` del `~C` del padre, porque ese
+    precio ya trae los porcentajes dentro. Con la regla vieja `ICV260` salía
+    336,39 frente a 291,50: el beneficio cobrado dos veces.
+    """
+    origen = ENTRADAS / nombre
+    if not origen.exists():
+        pytest.skip(f"falta {nombre} en input/")
+    destino = tmp_path / nombre
+    convertir_porcentuales(origen, destino)
+
+    salida = _lineas(destino)
+    unidades, precios = _unidades_y_precios(salida)
+
+    def es_pct(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades.get(codigo, ""))
+
+    por_padre = dict(_descompuestos(salida))
+    desviados = []
+    for padre in FICHEROS_SOLO_PCT[nombre]:
+        esperado = SOLO_PORCENTUALES[padre]
+        calculado = _importe_total(por_padre[padre], precios, es_pct)
+        if abs(calculado - esperado) > Decimal("0.01"):
+            desviados.append(f"{padre}: {calculado} != {esperado}")
+    assert desviados == []
