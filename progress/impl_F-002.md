@@ -181,10 +181,10 @@ en `progress/current.md`.
 | Evidencia | Valor |
 |---|---|
 | Tests ejecutados | **457 pasan, 1 skip** (`python -m pytest tests -q`); **110** son de F-002 |
-| Cobertura de las líneas cambiadas | PENDIENTE |
-| Mutantes / supervivientes | PENDIENTE |
-| Tiempo de ejecución de la suite | **58,2 s** (los 110 de F-002, ~2 s) |
-| `bash harness/init.sh` | PENDIENTE |
+| Cobertura de las líneas cambiadas | **98,7 %** (384/389, umbral 80 %, nivel `critico`) |
+| Mutantes / supervivientes | **168 generados, 168 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo sobre el código nuevo (305,5 s, SHA `8c08432` = HEAD, alcance 817 líneas) → `progress/mutacion_F-002.md` |
+| Tiempo de ejecución de la suite | **52,5 s** en la última pasada de `init.sh` (los 110 de F-002, ~2 s) |
+| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución: tras cerrar T23) |
 
 ### Supervivientes: cómo se llegó al cero
 
