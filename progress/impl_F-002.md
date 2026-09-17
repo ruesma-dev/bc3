@@ -20,9 +20,8 @@ Rama `feature/F-002-porcentuales-a-ud`, un commit por tarea (T1-T14).
 | `tests/fixtures/f002_*.bc3` | 7 fixtures con números reales de `input/` |
 | `docs/ARCHITECTURE.md`, `.gitignore` | el step nuevo en el orden del pipeline; excepción para versionar `tests/fixtures/*.bc3` |
 
-Lo que **no** se ha tocado: `convert_to_material`, `build_tree_service`, los
-clones `.1`, la FASE 2 y `input/` (solo lectura; los tests escriben en
-`tmp_path`).
+No se toca: `convert_to_material`, `build_tree_service`, los clones `.1`, la
+FASE 2 ni `input/` (solo lectura; los tests escriben en `tmp_path`).
 
 ## Fase RED · trazas reales del fallo
 
@@ -78,8 +77,7 @@ E   ImportError: cannot import name 'ConvertirPorcentualesStep' from
 1 error in 0.86s
 ```
 
-Cada una pasó a verde con el commit de implementación siguiente (T3, T5, T7,
-T10 y T11 respectivamente).
+Cada una pasó a verde con el commit siguiente (T3, T5, T7, T10 y T11).
 
 ## Lo que se verificó con números reales
 
@@ -137,9 +135,8 @@ Y los literales de Presto, escritos a mano en los tests (no recalculados):
    borrarlos cuando ninguna tripleta los referencia. Se aplica la regla tal
    cual está escrita; si el humano prefiere conservarlos cuando no hay
    conversión, es un cambio de una línea en `_decidir_conceptos_a_eliminar`.
-5. **Guardas muertas eliminadas** en el módulo nuevo: `campos[1]` existe
-   siempre si la línea empieza por `~C|`/`~D|`/`~T|`. Lo levantó la campaña de
-   mutación (mutantes equivalentes sobre código inalcanzable).
+5. **Guardas y código muertos eliminados** en el módulo nuevo: los levantó la
+   campaña de mutación como mutantes equivalentes (ver §Supervivientes).
 
 ## Pendiente · T15, verificación MANUAL (humano)
 
@@ -152,53 +149,71 @@ presupuesto y el precio de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`.
 **Resultado: PENDIENTE** — nadie lo ha ejecutado; queda anotado en
 `progress/current.md`.
 
+## Corrección tras el review (CHANGES_REQUESTED · punto 1)
+
+**El doble de `convert_to_material` tenía otra firma que el original.** El
+espía de `tests/test_f002_pipeline.py` se declaraba `def espia(src, dst,
+**kwargs)` y el original es `convert_to_material(src, dst)`, que no admite
+keywords. Con ese doble, el `try` de `TransformBC3Step` tenía éxito en los
+tests, cuando en producción **siempre** lanza `TypeError` y la rama viva es el
+`except` (`design.md` §D7). Resultado: las líneas 79-81 de
+`application/pipeline/steps.py` —la llamada que de verdad entrega el BC3
+preprocesado al resto del ETL— no las ejecutaba ningún test, y
+`test_f002_transform_usa_la_ruta_preprocesada_cuando_existe` daba verde sobre
+la rama muerta.
+
+Arreglo: `def espia(src, dst):`. **Medido aquí, no aceptado del informe de
+review** (`python -m coverage run --source=application/pipeline -m pytest
+tests/test_f002_pipeline.py`): `steps.py` pasa de **63 %** (sin cubrir 23-26,
+**79-81**, 90-101, 107-111, 114-122, 128-136) a **65 %**, con las mismas
+líneas menos las 79-81. Los 6 tests del fichero siguen pasando y la suite
+entera sigue verde: el problema era solo la firma del doble.
+
+Observaciones no bloqueantes: fuera `hay_porcentual()`, que no llamaba nadie,
+y corregido el comentario de `_decidir_conceptos_a_eliminar`, que mencionaba
+`~T|` en un bucle que solo filtra `~C|`. Los 42 `~C` de `presupuesto.bc3` se
+quedan como están: es decisión de negocio del humano.
+
 ## Evidencias
 
 | Evidencia | Valor |
 |---|---|
 | Tests ejecutados | **445 pasan, 1 skip** (`python -m pytest tests -q`); **98** son de F-002 |
-| Cobertura de las líneas cambiadas | **98,1 %** (357/364, umbral 80 %, nivel `critico`) |
-| Mutantes / supervivientes | **156 generados, 156 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (`python -m harness.mutacion --feature F-002`, 324,9 s, SHA `e4aaffe` = HEAD) → `progress/mutacion_F-002.md` |
-| Tiempo de ejecución de la suite | **42,7 s** (los 98 de F-002, 4,7 s) |
-| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución tras cerrar T14) |
+| Cobertura de las líneas cambiadas | **98,6 %** (357/362, umbral 80 %, nivel `critico`); antes del arreglo del doble, 98,1 % (357/364) |
+| Mutantes / supervivientes | **156 generados, 156 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo, relanzada tras el review (`python -m harness.mutacion --feature F-002`, 395,1 s, SHA `8fb5393` = HEAD, alcance 746 líneas) → `progress/mutacion_F-002.md` |
+| Tiempo de ejecución de la suite | **53,0 s** en la última pasada de `init.sh` (los 98 de F-002, ~2 s) |
+| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución: tras el arreglo del review) |
 
-### Supervivientes: los tres asaltos de la campaña
+### Supervivientes: cómo se llegó al cero
 
-La campaña se lanzó cuatro veces; el informe de disco es el de la cuarta, que
-es la que vale: su SHA es exactamente el de HEAD.
+| Campaña | Mutantes | Supervivientes |
+|---|---|---|
+| 1ª (`465165e`) | 174 | 62 · huecos reales de test + guardas inalcanzables |
+| 2ª (`897d3e7`) | 156 | 3 · los tres `mkdir(parents=True)` |
+| 3ª (`49722f4`) y 4ª (`e4aaffe`) | 156 | 0 |
+| **5ª (`8fb5393`, la de disco)** | **156** | **0** |
 
-| Campaña | Mutantes | Supervivientes | Qué eran |
-|---|---|---|---|
-| 1ª (`465165e`) | 174 | 62 | huecos reales de test + guardas de código inalcanzable |
-| 2ª (`897d3e7`) | 156 | 3 | los tres `mkdir(parents=True)` |
-| 3ª (`49722f4`) | 156 | 0 | — |
-| **4ª (`e4aaffe`, la de disco)** | **156** | **0** | relanzada tras reforzar un test |
+Cada superviviente se cerró con un test o quitando el código que lo generaba;
+ninguno quedó justificado «a mano». Por familias:
 
-Cómo se cerraron, por familias (ninguno quedó justificado «a mano»):
-
-1. **Contrato del helper compartido** (`_shorten_code_unique`, 3 mutantes):
-   nada comprobaba que el defecto sea `forzar_unicidad=False` ni que el helper
-   NO registre en `used` lo que devuelve intacto. Dos tests nuevos.
-2. **Números ilegibles** (`importe_linea`, `importe_porcentual`,
-   `_base_es_indeterminada`, 6 mutantes): faltaba el caso «uno de los dos
-   números no se lee». Tests nuevos, incluido el `~D` que por eso cae en R16.
-3. **`~C` y `~D` truncados** (12 mutantes): cada `if len(campos) > N` necesita
-   un registro con exactamente N campos. Un BC3 de test con `~C` de 2, 3, 4, 5
-   y 6 campos y `~D` sin barra y sin pipe final los cazó todos.
-4. **Filas del informe** (6 mutantes): se comprobaba el motivo pero no el
-   padre, el código, el rendimiento ni el importe de cada caso. Ahora sí.
-5. **Redondeo acumulado** (R6, 1 mutante): con la base sin redondear el
-   segundo clon del caso de prueba sale 56,17 en vez de 56,18. Test con esos
-   números.
-6. **Inmutabilidad del plan** (3 mutantes `frozen=True`): test que comprueba
-   que `CasoPorcentual`, `LineaClon` y `PlanDescompuesto` no se dejan tocar.
-7. **`~T` multilínea y líneas sueltas** (2 mutantes): test con un `~T` de dos
-   líneas que sobrevive y otro que se borra entero, y una línea antes del
-   primer registro.
-8. **Carpetas de salida** (4 mutantes `parents=True`): los tests escribían a
-   un solo nivel por crear, donde `parents=False` también vale. Ahora escriben
-   dos niveles por debajo de `tmp_path`.
-9. **Código muerto** (≈14 mutantes equivalentes): `campos[1]` existe siempre
-   si la línea empieza por `~C|`/`~D|`/`~T|`/`~M|`, y los valores por defecto
-   de `InformePorcentuales.anota` y de `construir_pipeline` no los usaba
-   nadie. Se quitaron: un mutante equivalente es código que sobra.
+1. **Contrato de `_shorten_code_unique`** (3): nadie comprobaba el defecto
+   `forzar_unicidad=False` ni que no registre en `used` lo que devuelve
+   intacto. Dos tests.
+2. **Números ilegibles** (6): faltaba «uno de los dos números no se lee», en
+   `importe_linea`, `importe_porcentual` y `_base_es_indeterminada`.
+3. **`~C` y `~D` truncados** (12): cada `if len(campos) > N` pide un registro
+   con exactamente N campos. Un BC3 de test con `~C` de 2, 3, 4, 5 y 6 campos
+   y `~D` sin barra y sin pipe final los cazó todos.
+4. **Filas del informe** (6): se miraba el motivo pero no el padre, el código,
+   el rendimiento ni el importe.
+5. **Redondeo acumulado** (R6, 1): sin redondear la base, el segundo clon del
+   caso de prueba sale 56,17 en vez de 56,18.
+6. **Inmutabilidad del plan** (3 `frozen=True`) y **`~T` multilínea y líneas
+   sueltas** (2): tests nuevos para las dos cosas.
+7. **Carpetas de salida** (4 `parents=True`): los tests creaban un solo nivel,
+   donde `parents=False` también vale; ahora dos.
+8. **Código muerto** (≈14 equivalentes): `campos[1]` existe siempre tras
+   `~C|`/`~D|`/`~T|`/`~M|`, y los valores por defecto de
+   `InformePorcentuales.anota` y `construir_pipeline` no los usaba nadie. Se
+   quitaron: un mutante equivalente es código que sobra. En la 5ª campaña se
+   fue por lo mismo `hay_porcentual()`, que levantó el review.
