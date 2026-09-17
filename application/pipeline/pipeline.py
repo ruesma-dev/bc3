@@ -13,6 +13,8 @@ from application.services.build_tree_service import Node
 class ETLContext:
     settings: Settings
     original_path: Optional[Path] = None
+    # F-002: salida de la pasada de porcentuales, que alimenta a TransformBC3Step
+    preprocessed_path: Optional[Path] = None
     modified_path: Optional[Path] = None
     roots: Optional[List[Node]] = None
     csv_path: Optional[Path] = None

@@ -1,6 +1,7 @@
 # application/pipeline/steps.py
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,12 @@ from application.pipeline.pipeline import ETLContext, Step
 from application.services.build_tree_service import build_tree
 from application.services.export_csv_service import export_to_csv
 from infrastructure.bc3.bc3_modifier import convert_to_material
+from infrastructure.bc3.bc3_porcentajes import convertir_porcentuales
+
+logger = logging.getLogger(__name__)
+
+# Nombre del BC3 intermedio que deja la pasada de porcentuales (F-002).
+FICHERO_SIN_PORCENTUALES = "presupuesto_sin_porcentuales.bc3"
 
 
 @dataclass
@@ -20,17 +27,49 @@ class ResolveInputStep(Step):
 
 
 @dataclass
+class ConvertirPorcentualesStep(Step):
+    """F-002 · Pasada previa: los descompuestos porcentuales pasan a UD.
+
+    Corre ANTES de `TransformBC3Step` y deja su salida en
+    `ctx.preprocessed_path`, que es lo que el paso siguiente transformará. Con
+    la bandera apagada no hace nada y el ETL sigue con el fichero original
+    (R21).
+    """
+
+    def run(self, ctx: ETLContext) -> None:
+        assert ctx.original_path is not None
+        if not ctx.settings.porcentuales_a_ud:
+            logger.info("porcentuales_a_ud desactivada: no se preprocesa nada")
+            return
+
+        out_dir = ctx.settings.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        destino = out_dir / FICHERO_SIN_PORCENTUALES
+        informe = convertir_porcentuales(
+            ctx.original_path, destino, encoding=ctx.settings.encoding
+        )
+        ctx.preprocessed_path = destino
+        logger.info(
+            "Porcentuales a UD → %s (%d ~D, %d líneas, %d conceptos eliminados)",
+            destino, informe.descompuestos, informe.lineas_convertidas,
+            informe.conceptos_eliminados,
+        )
+
+
+@dataclass
 class TransformBC3Step(Step):
     def run(self, ctx: ETLContext) -> None:
         assert ctx.original_path is not None
         out_dir = ctx.settings.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         mod_file = out_dir / "presupuesto_material.bc3"
+        # F-002: si la pasada de porcentuales corrió, se transforma SU salida.
+        src = ctx.preprocessed_path or ctx.original_path
 
         # Intento con firma nueva (parametrizada) y fallback a firma antigua
         try:
             convert_to_material(
-                src=ctx.original_path,
+                src=src,
                 dst=mod_file,
                 max_code_len=ctx.settings.max_code_len,
                 fill_unit_ud=ctx.settings.fill_unit_ud,
@@ -39,7 +78,7 @@ class TransformBC3Step(Step):
             )
         except TypeError:
             # Firma antigua: convert_to_material(src, dst)
-            convert_to_material(ctx.original_path, mod_file)
+            convert_to_material(src, mod_file)
 
         ctx.modified_path = mod_file
         print(f"BC3 modificado  →  {mod_file.resolve()}")
