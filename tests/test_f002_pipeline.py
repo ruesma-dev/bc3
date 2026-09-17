@@ -37,9 +37,16 @@ def _contexto(tmp_path, **cambios) -> ETLContext:
 
 
 def _espiar_convert_to_material(monkeypatch) -> list[Path]:
+    """Doble con la MISMA firma que el original: `convert_to_material(src, dst)`.
+
+    Sin esto el doble aceptaría los keywords que la función real rechaza, el
+    `try` de `TransformBC3Step` tendría éxito y el test daría verde sobre la
+    rama que en producción nunca se ejecuta (`design.md` §D7: el `try` siempre
+    lanza `TypeError` y la rama viva es el `except`).
+    """
     recibidas: list[Path] = []
 
-    def espia(src, dst, **kwargs):
+    def espia(src, dst):
         recibidas.append(Path(src))
         Path(dst).write_bytes(Path(src).read_bytes())
 

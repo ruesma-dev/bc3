@@ -23,7 +23,7 @@ Detalle del contrato en `specs/F-002-porcentuales-a-ud/`.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
@@ -224,11 +224,6 @@ def triples_de_cuerpo(cuerpo: str) -> list[Tripleta]:
         (partes[i], partes[i + 1], partes[i + 2])
         for i in range(0, len(partes) - 2, 3)
     ]
-
-
-def hay_porcentual(triples: Iterable[Tripleta],
-                   es_pct: Callable[[str], bool]) -> bool:
-    return any(es_pct(codigo) for codigo, _, _ in triples)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,7 +436,7 @@ def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
         if not linea.startswith("~C|"):
             continue
         campos = _campos(linea)
-        codigo = campos[1]  # existe siempre: la línea empieza por "~C|" o "~T|"
+        codigo = campos[1]  # existe siempre: la línea empieza por "~C|"
         if codigo and es_pct(codigo):
             porcentuales.add(codigo)
 
