@@ -375,15 +375,25 @@ def test_f002_r16_el_descompuesto_con_base_indeterminada_sale_intacto(tmp_path):
     )
 
 
-def test_f002_r17_todo_descompuesto_acaba_en_barra_y_sus_codigos_existen(tmp_path):
+def test_f002_r17_todo_descompuesto_reescrito_acaba_en_barra_y_sus_codigos_existen(tmp_path):
+    """La exigencia es sobre los `~D` REESCRITOS.
+
+    Un `~D` que la pasada deja intacto puede arrastrar referencias rotas de la
+    entrada —`f002_sin_precio.bc3` trae una a propósito, es lo que dispara
+    R16— y arreglarlas no es cosa de esta feature (R18).
+    """
     for fixture in sorted(FIXTURES.glob("f002_*.bc3")):
         lineas, _, _ = _convertir(tmp_path, fixture.name)
+        entrada = set(leer(fixture))
         codigos = {l.split("|")[1] for l in lineas if l.startswith("~C|")}
-        for linea in [l for l in lineas if l.startswith("~D|")]:
+        descompuestos = [l for l in lineas if l.startswith("~D|")]
+        assert descompuestos
+        for linea in descompuestos:
             assert linea.endswith("\\|"), linea
             assert not linea.endswith("\\\\|"), linea
-            cuerpo = linea.split("|")[2]
-            partes = cuerpo.split("\\")
+            if linea in entrada:
+                continue  # no reescrito
+            partes = linea.split("|")[2].split("\\")
             for i in range(0, len(partes) - 2, 3):
                 assert partes[i] in codigos, f"{fixture.name}: falta ~C de {partes[i]}"
 

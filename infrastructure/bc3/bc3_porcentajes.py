@@ -452,3 +452,116 @@ def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
         else:
             plan.conceptos_a_eliminar.add(codigo)
     plan.informe.conceptos_eliminados = len(plan.conceptos_a_eliminar)
+
+
+# --------------------------------------------------------------------------- #
+# Reescritura (pasada 2)                                                       #
+# --------------------------------------------------------------------------- #
+def _terminador_de(linea: str) -> str:
+    """El salto de línea que traía esa línea, para devolverlo tal cual."""
+    return linea[len(linea.rstrip("\r\n")):]
+
+
+def _linea_c_de_clon(clon: LineaClon, terminador: str) -> str:
+    """`~C` del clon: unidad UD, precio = importe D4, tipo 3 (R4)."""
+    return (
+        f"~C|{clon.codigo}|{UNIDAD_CLON}|{clon.resumen}|"
+        f"{formatear_precio(clon.precio)}|{clon.fecha}|{TIPO_CLON}|{terminador}"
+    )
+
+
+def _reescribir_d(linea: str, descompuesto: PlanDescompuesto) -> str:
+    """Sustituye cada tripleta porcentual por `clon\\1\\1` (R3).
+
+    Las demás tripletas salen con su texto de entrada, sin reformatear, y el
+    cierre `\\|` lo garantiza `_format_d_triplets` de `bc3_modifier` (R17).
+    """
+    campos = _campos(linea)
+    triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
+    por_indice = {clon.indice: clon for clon in descompuesto.clones}
+    tripletas = [
+        f"{por_indice[i].codigo}\\1\\1" if i in por_indice else "\\".join(triple)
+        for i, triple in enumerate(triples)
+    ]
+    texto = _format_d_triplets(campos[1], tripletas)
+    return texto[:-1] + _terminador_de(linea)
+
+
+def _remapear_m(linea: str, remapeo: Mapping[tuple[str, str], str]) -> str:
+    """R15: un `~M` sobre el par `padre\\porcentual` pasa a apuntar al clon."""
+    campos = _campos(linea)
+    if len(campos) < 2:
+        return linea
+    par = campos[1].split("\\")
+    if len(par) != 2:
+        return linea
+    padre, hijo = par
+    clon = remapeo.get((codigo_base_de_padre(padre), hijo))
+    if clon is None:
+        return linea
+    campos[1] = f"{padre}\\{clon}"
+    return "|".join(campos) + _terminador_de(linea)
+
+
+def convertir_porcentuales(src: Path,
+                           dst: Path,
+                           *,
+                           encoding: str = "latin-1",
+                           activo: bool = True) -> InformePorcentuales:
+    """PASADA 2: escribe en `dst` el BC3 con los porcentuales ya convertidos.
+
+    Con `activo=False` copia el fichero sin tocar ni una línea (R21). Si la
+    entrada no existe lanza `FileNotFoundError` y no crea la salida (R23).
+    """
+    src, dst = Path(src), Path(dst)
+    if not src.exists():
+        raise FileNotFoundError(src)
+
+    if not activo:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+        logger.info("porcentuales_a_ud desactivada: %s copiado sin cambios", src.name)
+        return InformePorcentuales()
+
+    plan = planificar(src, encoding)
+    lineas = _leer_lineas(src, encoding)
+    terminador = _terminador(lineas)
+
+    salida: list[str] = []
+    borrando = False  # dentro de un registro multilínea que se está eliminando
+    for numero, linea in enumerate(lineas):
+        if not linea.startswith("~"):
+            # Continuación del registro anterior (los ~T largos la usan).
+            if not borrando:
+                salida.append(linea)
+            continue
+
+        borrando = False
+        if linea.startswith(("~C|", "~T|")):
+            campos = _campos(linea)
+            codigo = campos[1] if len(campos) > 1 else ""
+            if codigo in plan.conceptos_a_eliminar:
+                # R13: el concepto porcentual ya no lo referencia nadie.
+                borrando = True
+                continue
+
+        if numero in plan.planes:
+            descompuesto = plan.planes[numero]
+            salida.extend(_linea_c_de_clon(c, terminador) for c in descompuesto.clones)
+            salida.append(_reescribir_d(linea, descompuesto))
+            continue
+
+        if linea.startswith("~M|"):
+            salida.append(_remapear_m(linea, plan.remapeo_m))
+            continue
+
+        salida.append(linea)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes("".join(salida).encode(encoding))
+    logger.info(
+        "%s → %s: %d ~D con porcentual, %d líneas convertidas, %d conceptos eliminados",
+        src.name, dst.name, plan.informe.descompuestos,
+        plan.informe.lineas_convertidas, plan.informe.conceptos_eliminados,
+    )
+    return plan.informe
