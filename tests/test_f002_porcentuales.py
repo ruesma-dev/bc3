@@ -797,8 +797,9 @@ def test_f002_r21_la_bandera_existe_y_viene_activada_por_defecto():
 def test_f002_r21_con_la_bandera_apagada_el_fichero_sale_identico_byte_a_byte(tmp_path):
     ajustes = replace(Settings(), porcentuales_a_ud=False)
     origen = FIXTURES / "f002_cadena.bc3"
-    # Carpeta que todavía no existe: la pasada la crea, como hace el ETL.
-    destino = tmp_path / "entregas" / "copia.bc3"
+    # Carpetas que todavía no existen: la pasada las crea, como hace el ETL
+    # la primera vez que se ejecuta sobre un equipo recién montado.
+    destino = tmp_path / "entregas" / "f002" / "copia.bc3"
     informe = convertir_porcentuales(origen, destino,
                                      activo=ajustes.porcentuales_a_ud)
     assert destino.read_bytes() == origen.read_bytes()
@@ -818,8 +819,8 @@ def test_f002_r23_si_no_existe_la_entrada_lanza_filenotfound_y_no_crea_la_salida
 # R22 · Ejecución sobre un fichero suelto                                      #
 # --------------------------------------------------------------------------- #
 def test_f002_r22_el_cli_convierte_un_fichero_suelto_y_termina_en_cero(tmp_path):
-    salida = tmp_path / "entregas" / "salida.bc3"
-    informe = tmp_path / "informes" / "informe.csv"
+    salida = tmp_path / "entregas" / "f002" / "salida.bc3"
+    informe = tmp_path / "informes" / "f002" / "informe.csv"
     codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
                        "--informe", str(informe)])
     assert codigo == 0
