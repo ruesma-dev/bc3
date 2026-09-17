@@ -14,14 +14,20 @@ Sin red, sin BBDD y sin servicios de IA: la pasada solo lee y escribe ficheros.
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
+from infrastructure.bc3.bc3_modifier import MAX_CODE_LEN
 from infrastructure.bc3.bc3_porcentajes import (
     calcular_importes,
+    codigo_de_clon,
     es_porcentual,
     formatear_precio,
     importe_linea,
     importe_porcentual,
+    planificar,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 # Precios y tripletas literales de `input/`, tal y como los lee el BC3.
 PRECIOS_43_15 = {
@@ -54,6 +60,16 @@ TRIPLES_07_02_05 = [
 def _por_codigo(codigo: str) -> bool:
     """`es_pct` de conveniencia: decide solo por el código."""
     return es_porcentual(codigo, "")
+
+
+def _clones_por_padre(plan) -> dict[str, list[str]]:
+    """Códigos de clon planificados, agrupados por el padre de su `~D`."""
+    agrupados: dict[str, list[str]] = {}
+    for descompuesto in plan.planes.values():
+        agrupados.setdefault(descompuesto.padre, []).extend(
+            clon.codigo for clon in descompuesto.clones
+        )
+    return agrupados
 
 
 # --------------------------------------------------------------------------- #
@@ -169,3 +185,54 @@ def test_f002_r11_los_rendimientos_cero_cuentan_como_importe_cero():
     assert importes[3] == Decimal("16")
     assert sum(importes) == Decimal("16")
     assert formatear_precio(importes[2]) == "0"
+
+
+# --------------------------------------------------------------------------- #
+# R5 · Códigos de clon                                                         #
+# --------------------------------------------------------------------------- #
+def test_f002_r5_el_codigo_del_clon_es_el_padre_con_sufijo_p_n():
+    ocupados: dict[str, str] = {}
+    assert codigo_de_clon("05.06.29", 1, ocupados) == "05.06.29.P1"
+    assert codigo_de_clon("43.15", 3, ocupados) == "43.15.P3"
+
+
+def test_f002_r5_recorta_el_padre_hasta_caber_en_veinte_caracteres():
+    """`RUESMA-C32.04.07.01` (19) + `.P1` daría 22: el recorte es real."""
+    ocupados: dict[str, str] = {}
+    clon = codigo_de_clon("RUESMA-C32.04.07.01", 1, ocupados)
+    assert len(clon) <= MAX_CODE_LEN
+    assert clon.endswith(".P1")
+    assert clon == "RUESMA-C32.04.07..P1"
+
+
+def test_f002_r5_dos_clones_del_mismo_padre_no_chocan_entre_si():
+    ocupados: dict[str, str] = {}
+    primero = codigo_de_clon("09.01.04", 1, ocupados)
+    segundo = codigo_de_clon("09.01.04", 1, ocupados)
+    assert primero != segundo
+
+
+def test_f002_r5_esquiva_un_codigo_corto_ya_ocupado():
+    ocupados = {"09.01.03.P1": "09.01.03.P1"}
+    clon = codigo_de_clon("09.01.03", 1, ocupados)
+    assert clon != "09.01.03.P1"
+    assert len(clon) <= MAX_CODE_LEN
+
+
+def test_f002_r5_planificar_evita_el_truncado_a_veinte_de_un_codigo_largo():
+    """D6: `convert_to_material` recortará después; el clon reserva su hueco."""
+    plan = planificar(FIXTURES / "f002_codigo_largo.bc3")
+    clones = _clones_por_padre(plan)
+    elegido = clones["RUESMA-C32.04.07.01"][0]
+    assert elegido != "RUESMA-C32.04.07..P1"  # lo ocupa el truncado del largo
+    assert len(elegido) <= MAX_CODE_LEN
+
+
+def test_f002_r5_planificar_no_repite_ningun_codigo_de_clon():
+    plan = planificar(FIXTURES / "f002_codigo_largo.bc3")
+    todos = [c for lista in _clones_por_padre(plan).values() for c in lista]
+    assert len(todos) == 3
+    assert len(set(todos)) == 3
+    assert all(len(c) <= MAX_CODE_LEN for c in todos)
+    # El padre sin colisiones se queda con el código natural.
+    assert "09.01.04.P1" in todos
