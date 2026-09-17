@@ -421,8 +421,10 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
             producto = _producto_de_factores(triples)
             if producto is None:
                 # R9 ter: algún (1 + r) ≤ 0; la base no se puede despejar.
+                # El rendimiento se lee sin red: para llegar aquí ya pasó por
+                # `_base_es_indeterminada`, que aparta los ilegibles.
                 informe.anota(padre, primer_pct[0], MOTIVO_BASE_NO_DESPEJABLE,
-                              a_decimal(primer_pct[2]) or 0, 0)
+                              a_decimal(primer_pct[2]), 0)
                 logger.info("~D %s sin convertir: base no despejable", padre)
                 continue
             base_inicial = redondear_centimos(precio_padre / producto)

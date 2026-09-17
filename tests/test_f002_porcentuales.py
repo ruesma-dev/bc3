@@ -447,9 +447,11 @@ def test_f002_r9ter_si_el_descuento_se_come_la_base_el_descompuesto_no_se_toca(t
     # Los conceptos % siguen vivos porque siguen referenciados (R14).
     assert _registro(lineas, "~C|%TODO|")
     assert _registro(lineas, "~C|%MAS|")
-    casos = [(c.padre, c.codigo, c.rendimiento) for c in informe.casos
+    casos = [(c.padre, c.codigo, c.rendimiento, c.importe) for c in informe.casos
              if c.motivo == "base_no_despejable"]
-    assert casos == [("09.20.01", "%TODO", -1.0), ("09.20.02", "%MAS", -1.5)]
+    # El importe va a 0: no hay ningún número que calcular, que es el problema.
+    assert casos == [("09.20.01", "%TODO", -1.0, 0.0),
+                     ("09.20.02", "%MAS", -1.5, 0.0)]
 
 
 def test_f002_r10_base_cero_con_una_linea_normal_detras_da_precio_cero(tmp_path):
