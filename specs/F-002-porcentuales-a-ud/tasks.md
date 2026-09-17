@@ -41,6 +41,6 @@ la implementación que las pone en verde.
 - [x] T28: Añadir `porcentuales_decimales` a `Settings` (`_env_int("PORCENTUALES_DECIMALES", "4")`, saneado a 2..6) y propagarlo por `ConvertirPorcentualesStep` y el CLI  |  Verificación: T26 y T27 en verde
 - [x] T29: Parametrizar el redondeo en `infrastructure/bc3/bc3_porcentajes.py` (`quantize(Decimal(1).scaleb(-d), ROUND_HALF_UP)` en el precio del clon, en la base de R9 y en el residuo de R9 bis) y el formateo del número de R7  |  Verificación: `pytest tests/ -q` en verde
 - [x] T30: Test de R19 y R19 bis **con `d = 2` y con `d = 4`** (`Settings` clonado con `replace`), sobre fixtures y sobre cada `.bc3` de `input/`: la tolerancia se calcula con `d` y la suma de los `~D` de R9 sigue dando `P` exacto  |  Verificación: `pytest tests/test_f002_invariante.py -q`
-- [ ] T31: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
+- [x] T31: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
 - [ ] T32: Verificación MANUAL (humano): importar en Presto la salida con 4 decimales y anotar **cuántos decimales acepta**; si acepta 6, subir `PORCENTUALES_DECIMALES=6` y repetir  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
-- [ ] T33: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
+- [x] T33: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0

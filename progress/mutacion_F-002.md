@@ -1,7 +1,7 @@
 <!-- progress/mutacion_F-002.md -->
 # F-002 · Campaña de mutación
 
-Generado por `python -m harness.mutacion --feature F-002 --workers 4` el 2026-09-17 18:31.
+Generado por `python -m harness.mutacion --feature F-002 --workers 4` el 2026-09-18 01:08.
 
 ## Alcance
 
@@ -10,34 +10,34 @@ Origen del diff: **rama** (`75f805e6806ea04ffe092000b50313b4c2d36e0e` .. `featur
 | Fichero | Líneas en alcance |
 |---|---|
 | `application/pipeline/pipeline.py` | 2 |
-| `application/pipeline/steps.py` | 41 |
-| `config/settings.py` | 3 |
+| `application/pipeline/steps.py` | 44 |
+| `config/settings.py` | 7 |
 | `infrastructure/bc3/bc3_modifier.py` | 10 |
-| `infrastructure/bc3/bc3_porcentajes.py` | 635 |
+| `infrastructure/bc3/bc3_porcentajes.py` | 689 |
 | `interface_adapters/cli/__init__.py` | 2 |
-| `interface_adapters/cli/porcentuales_cli.py` | 102 |
+| `interface_adapters/cli/porcentuales_cli.py` | 109 |
 | `interface_adapters/controllers/etl_controller.py` | 22 |
-| **Total** | **817** |
+| **Total** | **885** |
 
 ## Totales
 
 | Métrica | Valor |
 |---|---|
-| Mutantes generados | 168 |
-| Mutantes evaluados | 168 |
-| Muertos | 168 |
+| Mutantes generados | 177 |
+| Mutantes evaluados | 177 |
+| Muertos | 177 |
 | Supervivientes | 0 |
 | Timeouts | 0 |
 | Timeouts repasados en serie | 0: ningún mutante agotó el reloj |
 | Sin veredicto (base rota) | 0 |
-| Tiempo total | 305.5 s |
-| SHA de HEAD medido | `8c084323746961cf492e85ba9fb0ea71152a9c35` |
-| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002__0yatir9/wk_0` | 40.4 |
-| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002__0yatir9/wk_1` | 41.3 |
-| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002__0yatir9/wk_2` | 40.5 |
-| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002__0yatir9/wk_3` | 41.3 |
-| Media por mutante evaluado (s) | 1.8 |
-| Timeout efectivo por mutante (s) | 120 — derivado de la línea base × 2.0 |
+| Tiempo total | 369.3 s |
+| SHA de HEAD medido | `7cf5d9a7656da35edcc3be20f1485a0614050750` |
+| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002_x8yv40h9/wk_0` | 71.5 |
+| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002_x8yv40h9/wk_1` | 73.5 |
+| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002_x8yv40h9/wk_2` | 73.8 |
+| Línea base (s) — `C:/Users/pgris/AppData/Local/Temp/mutacion_F-002_x8yv40h9/wk_3` | 71.1 |
+| Media por mutante evaluado (s) | 2.1 |
+| Timeout efectivo por mutante (s) | 148 — derivado de la línea base × 2.0 |
 | Suelo configurado (s) | 120 |
 | Workers | 4 |
 | Muestreo | no: campaña completa |
