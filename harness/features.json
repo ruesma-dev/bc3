@@ -4,7 +4,13 @@
   "rules": {
     "one_feature_at_a_time": true,
     "require_init_green_to_close": true,
-    "valid_status": ["pending", "spec_ready", "in_progress", "done", "blocked"]
+    "valid_status": [
+      "pending",
+      "spec_ready",
+      "in_progress",
+      "done",
+      "blocked"
+    ]
   },
   "features": [
     {
@@ -40,11 +46,12 @@
         "El BC3 resultante se importa sin errores en Presto (comprobación manual del humano sobre un presupuesto real, anotada en progress/).",
         "bash harness/init.sh en verde"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "sdd": true,
       "rigor": "critico",
       "priority": 2,
-      "branch": "feature/F-002-porcentuales-a-ud"
+      "branch": "feature/F-002-porcentuales-a-ud",
+      "spec": "specs/F-002-porcentuales-a-ud/"
     }
   ]
 }
