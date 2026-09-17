@@ -13,9 +13,9 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
 
 from config.settings import Settings
 from infrastructure.bc3.bc3_porcentajes import (

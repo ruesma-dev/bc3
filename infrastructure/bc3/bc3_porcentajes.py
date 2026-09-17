@@ -23,10 +23,10 @@ Detalle del contrato en `specs/F-002-porcentuales-a-ud/`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
 
 from infrastructure.bc3.bc3_modifier import (
     MAX_CODE_LEN,
@@ -289,7 +289,7 @@ def codigo_base_de_padre(padre: str) -> str:
     Caso real: `~D|33.03.01#|...` de El Escorial, cuyo `~M` apunta al par
     `33.03.01\\%CC`, ya sin la marca.
     """
-    return padre[:-1] if padre.endswith("#") else padre
+    return padre.removesuffix("#")
 
 
 def codigo_de_clon(padre: str, ordinal: int, ocupados: dict[str, str]) -> str:
