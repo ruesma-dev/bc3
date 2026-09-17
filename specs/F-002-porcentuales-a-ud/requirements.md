@@ -8,15 +8,14 @@ sobre `input/`) y `docs/ARCHITECTURE.md` §«Semántica de dominio», puntos 5-8
 concepto porcentual no trae unitario, lo calcula Presto*. La pasada tiene que
 reproducir ese cálculo y materializarlo como precio de un concepto propio.
 
-Alcance fijado por el humano: es una **pasada previa e independiente**
-(`.bc3` → `.bc3`) que **solo** toca líneas porcentuales; corre ANTES de
-`convert_to_material` y su salida alimenta al resto del ETL.
+Alcance fijado por el humano: **pasada previa e independiente** (`.bc3` →
+`.bc3`) que **solo** toca líneas porcentuales, ANTES de `convert_to_material`.
 
 ## Definiciones
 
-- **D1 · Línea porcentual**: tripleta `hijo\factor\rendimiento` de un `~D`
-  cuyo `hijo`, tras `strip()`, empieza por `%` **o** cuyo `~C` declara unidad
-  `%` (tras unificar). Las dos formas conviven en `input/`.
+- **D1 · Línea porcentual**: tripleta `hijo\factor\rendimiento` cuyo `hijo`,
+  tras `strip()`, empieza por `%` **o** cuyo `~C` declara unidad `%` (tras
+  unificar). Las dos formas conviven en `input/`.
 - **D2 · Importe de línea normal** = `precio(~C del hijo) × factor × rendimiento`.
 - **D3 · Base acumulada de una línea** = suma de los importes (D2/D4) de las
   líneas que **le preceden** en ese mismo `~D`, en orden de fichero.
@@ -43,7 +42,9 @@ porcentual original y resumen el del original (o su código si viene vacío).
 R5. El código del clon debe ser `<codigo_padre>.P<n>` (n = ordinal 1-based de
 la línea porcentual dentro de su `~D`), recortado por la derecha del código
 del padre hasta caber en 20 caracteres, y único frente a: todos los códigos
-`~C` del fichero, sus truncados a 20 caracteres y los clones ya emitidos.
+`~C` del fichero, sus truncados a 20 caracteres y los clones ya emitidos. La
+línea de base que crea R9 es el ordinal `0` de esa misma familia:
+`<codigo_padre>.P0`, con el mismo recorte y la misma comprobación de unicidad.
 
 R6. El sistema debe redondear el precio del clon a 2 decimales
 (`ROUND_HALF_UP`) y acumular en D3 el valor **ya redondeado**, de modo que la
@@ -56,10 +57,26 @@ R8. El sistema no debe corregir el residuo de redondeo en ninguna línea: las
 líneas no porcentuales salen byte a byte como entraron.
 
 R9. CUANDO **todas** las líneas de un `~D` son porcentuales (base 0) y el `~C`
-del padre trae un precio numérico distinto de 0, el sistema debe dar al clon
-de la **primera** línea porcentual ese precio del padre, aplicar las
-porcentuales siguientes sobre él, y registrar el caso en el informe como
-`precio_del_padre_aplicado`.
+del padre trae un precio numérico `P` ≠ 0, el sistema debe **reconstruir la
+base implícita** despejándola hacia atrás, `base = P / Π(1 + r_i)` sobre todos
+los rendimientos `r_i` porcentuales del `~D`, y escribir un `~D` con una
+**línea de base** (`<padre>.P0`, factor 1, rendimiento 1, precio = base) más
+una línea por cada porcentual original, cada una calculada con D4 sobre el
+acumulado; se registra en el informe como `base_reconstruida`. El precio del
+padre YA es el final, con los porcentajes dentro: asignárselo al primer clon y
+volver a aplicar los siguientes lo inflaba (`ICV260`: 336,39 en vez de 291,50,
+el beneficio cobrado dos veces).
+
+R9 bis. El sistema debe redondear la base a 2 decimales (`ROUND_HALF_UP`),
+calcular con ella los importes porcentuales según R6, y **absorber el residuo
+en la línea de base**: `precio(.P0) = P − Σ(importes porcentuales redondeados)`.
+Ninguna línea porcentual se retoca para cuadrar: así la suma del `~D` es
+exactamente `P`.
+
+R9 ter. SI algún `(1 + r_i)` de ese `~D` es 0 o negativo —descuento del −100 %
+o mayor, que hace la división imposible o absurda—, ENTONCES el sistema no debe
+convertir ese `~D`: lo deja intacto, conserva sus `%` y lo registra como
+`base_no_despejable`.
 
 R10. CUANDO un `~D` tiene al menos una línea no porcentual y su primera línea
 porcentual tiene base 0, el sistema debe dar precio `0` al clon (R9 no
@@ -77,17 +94,14 @@ porcentual —y su `~T`, si lo tiene— cuando ninguna tripleta del fichero de
 salida lo referencie ya.
 
 R14. SI un concepto porcentual queda referenciado por alguna tripleta no
-convertida, ENTONCES el sistema debe conservar su `~C` y su `~T` y registrar
-el motivo en el informe.
+convertida, ENTONCES el sistema debe conservar su `~C` y su `~T` y registrarlo.
 
-R15. CUANDO un registro `~M` referencia el par `padre\porcentual` de una línea
-convertida, el sistema debe reescribir el par con el código del clon. Caso
-real: `33.03.01\%CC` en El Escorial.
+R15. CUANDO un `~M` referencia el par `padre\porcentual` de una línea
+convertida, el par se reescribe con el clon (real: `33.03.01\%CC`, Escorial).
 
 R16. SI una línea que precede a una porcentual en su `~D` no tiene `~C` con
 precio numérico, ENTONCES el sistema debe dejar ese `~D` **entero** sin
-convertir, conservar sus conceptos `%` y registrarlo en el informe como
-`base_indeterminada`.
+convertir, conservar sus `%` y registrarlo como `base_indeterminada`.
 
 R17. Todo `~D` reescrito debe terminar en `\|` (exactamente una barra antes
 del cierre) y todos los códigos que aparezcan en él deben existir como `~C` en
@@ -107,9 +121,15 @@ entrada-contra-salida: **nunca** contra el precio del `~C` del padre (hay
 padres con precio fijado a mano que no cuadra con su propio descompuesto:
 `170100`, `1701010`, `07.02.01a`).
 
+R19 bis. **INVARIANTE de los `~D` de R9.** No se pueden comparar
+entrada-contra-salida (su entrada calcula 0), pero el importe calculado sobre
+la **SALIDA** debe ser igual al precio `P` del `~C` del padre con tolerancia de
+un céntimo. Es obligatorio: es la comprobación que caza el defecto de la R9
+anterior (`ICV260` habría salido 336,39 ≠ 291,50 y la suite habría fallado).
+
 R20. El sistema debe devolver un informe con: nº de `~D` procesados, nº de
 líneas convertidas, nº de conceptos `%` eliminados, y una fila por cada caso
-excepcional (R9, R14, R16) con padre, código porcentual, rendimiento e importe.
+excepcional (R9, R9 ter, R14, R16) con padre, código, rendimiento e importe.
 
 R21. DONDE la bandera `Settings.porcentuales_a_ud` esté desactivada, el
 sistema debe copiar el fichero sin modificar ninguna línea y no insertar el
@@ -125,5 +145,5 @@ R23. SI el fichero de entrada no existe, ENTONCES el sistema debe lanzar
 
 - Recalcular el precio del `~C` de los padres (lo hace Presto / el ERP).
 - Tocar `convert_to_material`, los clones `.1` o la FASE 2.
-- Descompuestos cuyo **padre** sea un concepto porcentual: no existen en
-  `input/` (medido); si aparecieran, caen en R16.
+- Descompuestos cuyo **padre** sea porcentual: no existen en `input/`
+  (medido); si aparecieran, caen en R16.

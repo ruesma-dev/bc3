@@ -2,50 +2,82 @@
 # Trabajo en curso
 
 **F-002 · Convertir los descompuestos porcentuales a UD con cantidad 1
-conservando el importe de Presto** · rama `feature/F-002-porcentuales-a-ud`
-· rigor `critico` · SDD sí.
+conservando el importe de Presto** · rama `feature/F-002-porcentuales-a-ud` ·
+rigor `critico` · estado `in_progress`.
 
-Estado: spec **aprobada** por el humano e **implementación en curso**
-(implementer). El informe con las evidencias va en `progress/impl_F-002.md`.
+**Ronda 2 en curso.** El reviewer aprobó la pasada 2, pero al verificar la
+salida real sobre `input/lagunamodificado16julio.bc3` apareció un defecto **en
+la R9 tal como estaba escrita**: con DOS líneas porcentuales inflaba la
+partida (`ICV260` daba 336,39 con un `~C` de 291,50, el beneficio cobrado dos
+veces). El humano decidió la corrección, el spec-author actualizó la spec
+(R9, R9 bis, R9 ter, R19 bis) y el implementer ha hecho T17-T23 y T25.
 
-## Decisiones que el humano ya cerró antes de implementar
+**La regla nueva**: cuando todas las líneas de un `~D` son porcentuales y el
+padre tiene precio `P` ≠ 0, se despeja la base hacia atrás
+(`base = P / Π(1 + r_i)`) y el `~D` pasa a tener una línea `<padre>.P0` con esa
+base más una línea por porcentual; el residuo de redondeo se absorbe en la
+línea de base. Los cuatro casos reales vuelven a sumar exactamente el precio
+de su `~C`: `ICV260` 291,50 · `ICV270` 369,50 · `31.04.03.01` 1.100,00 ·
+`32.03.04.32` 1.117,65.
 
-- **R9 aprobado tal cual**: en un `~D` cuyas líneas son TODAS porcentuales y
-  cuyo padre tiene precio ≠ 0, el clon de la primera línea recibe el precio
-  del padre y las siguientes se aplican sobre él. Son cuatro partidas reales:
-  `ICV260` (291,50) e `ICV270` (369,50) en `input/lagunamodificado16julio.bc3`,
-  y `31.04.03.01` (1.100,00) y `32.03.04.32` (1.117,65) en Siroco.
-- **No hay dos codificaciones de porcentual**: el `~D` lleva el rendimiento en
-  tanto por uno y el `~C` el porcentaje. Lo de «cantidad = base/100» es solo
-  cómo lo pinta Presto en pantalla (ver `progress/explore_porcentuales.md`
-  §4 bis). La fórmula D3/D4 de `requirements.md` es la buena.
-- El alcance es el de la spec: pasada previa independiente que **solo** toca
-  líneas porcentuales.
+Implementación y evidencias: `progress/impl_F-002.md`.
 
-## Estado de las 16 tareas
+**NO se marca `done`**: faltan T15 y T24, las dos verificaciones MANUALES del
+humano.
 
-T1-T14 hechas y commiteadas (una por tarea). T16 (`bash harness/init.sh`) en
-verde. Queda **T15, que es MANUAL del humano**.
+## T24 · pendiente del humano (regla nueva)
 
-## T15 · Verificación MANUAL pendiente (humano)
+```
+python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio.bc3" "output/laguna_sin_pct.bc3"
+```
+
+Importar en Presto y confirmar `ICV260` = 291,50 (no 336,39) e `ICV270` =
+369,50. **Resultado: PENDIENTE.**
+
+## T15 · pendiente del humano
+
+El fichero ya está generado y listo para importar:
 
 ```
 python -m interface_adapters.cli.porcentuales_cli "input/COSTE_250128_Siroco_Rv4mlo.bc3" "output/siroco_sin_pct.bc3"
 ```
 
-Luego importar `output/siroco_sin_pct.bc3` en Presto y confirmar que el total
-del presupuesto y el precio de `43.15`, `05.06.29`, `31.04.03.01` y
-`32.03.04.32` son los que Presto mostraba antes. El resultado se anota aquí.
+Resultado de esa ejecución: 262 `~D` con porcentual, 319 líneas convertidas,
+21 conceptos eliminados, 2 casos excepcionales (los de R9). Informe en
+`output/informe_porcentuales.csv`.
 
-**Resultado: PENDIENTE.** Nadie lo ha ejecutado todavía; el agente no puede
-darlo por hecho.
+Queda importar `output/siroco_sin_pct.bc3` en Presto y confirmar el total y
+el precio de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`.
+**Resultado: PENDIENTE.**
 
-## Nota de instalación · 2026-09-17
+## Comprobación independiente del líder (2026-09-17, regla R9 ANTERIOR)
 
-Arnés v1.7.10 instalado y adaptado; `bash harness/init.sh` en **ENTORNO
-LISTO**. `config/settings.py` restaurado (tenía pegada encima una copia de
-`budget_bc3_batch_service.py`). `dev` y `master` avanzados hasta el commit
-del arnés; sin push.
+Hecha sobre la salida real, al margen de los tests del implementer:
 
-**Pendiente de validación humana:** la sección «Semántica de dominio
-imprescindible» de `docs/ARCHITECTURE.md`.
+| Medida | Entrada | Salida | Desvío |
+|---|---|---|---|
+| Todos los `~D` salvo los 2 de R9 | 7.814.258,82 | 7.814.258,85 | **+0,03 €** |
+| Los 2 `~D` de R9 | 0,00 | 2.217,65 | +2.217,65 € |
+
+El desvío de 3 céntimos sobre 7,8 M€ es el redondeo acumulado de 319 líneas
+convertidas; el peor `~D` individual es `43.15`, con −0,0104 €. Los 2.217,65 €
+son exactamente `1.100,00 + 1.117,65`. Con la R9 nueva esos dos `~D` siguen
+sumando eso mismo —el precio de su `~C`, ahora repartido entre la línea de
+base y la porcentual—, y los dos de laguna dejan de inflarse. En la salida
+quedan **0** conceptos porcentuales y **0** líneas `~D` mal cerradas.
+
+## Decisiones abiertas del humano
+
+1. **T15 y T24**, arriba.
+2. **R13 sobre `input/presupuesto.bc3`**: borra 42 `~C` porcentuales sin
+   convertir ninguna línea, por ser un banco de precios cuyos `%` no usa
+   ningún `~D`. Es la regla tal como se aprobó; conservarlos cuando no ha
+   habido ninguna conversión es una línea en `_decidir_conceptos_a_eliminar`.
+3. **Porte a `arnes-base`** de la mejora de `CHECKPOINTS.md` que propone el
+   reviewer en las dos pasadas: extender el punto C4 de los dobles a los
+   sustitutos instalados con `monkeypatch.setattr`, comparando
+   `inspect.signature` con la del símbolo sustituido. Vale para cualquier
+   proyecto, así que por la regla de propagación del `CLAUDE.md` del
+   ecosistema va a `arnes-base` en este mismo trabajo. Sin hacer.
+4. **La semántica de dominio de `docs/ARCHITECTURE.md`** sigue sin validación
+   humana formal, aunque F-002 la ha confirmado con datos.
