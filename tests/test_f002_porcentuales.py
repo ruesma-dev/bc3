@@ -31,6 +31,7 @@ from infrastructure.bc3.bc3_porcentajes import (
     importe_porcentual,
     planificar,
 )
+from interface_adapters.cli import porcentuales_cli as cli
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -438,3 +439,52 @@ def test_f002_r23_si_no_existe_la_entrada_lanza_filenotfound_y_no_crea_la_salida
     with pytest.raises(FileNotFoundError):
         convertir_porcentuales(FIXTURES / "f002_no_existe.bc3", destino)
     assert not destino.exists()
+
+
+# --------------------------------------------------------------------------- #
+# R22 · Ejecución sobre un fichero suelto                                      #
+# --------------------------------------------------------------------------- #
+def test_f002_r22_el_cli_convierte_un_fichero_suelto_y_termina_en_cero(tmp_path):
+    salida = tmp_path / "salida.bc3"
+    informe = tmp_path / "informe.csv"
+    codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
+                       "--informe", str(informe)])
+    assert codigo == 0
+    assert "~C|43.15.P1|UD|" in salida.read_bytes().decode("latin-1")
+    assert informe.exists()
+
+
+def test_f002_r22_el_cli_escribe_el_informe_para_excel(tmp_path):
+    """R20 + convenio de Ruesma: UTF-8 con BOM, ';' y coma decimal."""
+    informe = tmp_path / "informe.csv"
+    cli.main([str(FIXTURES / "f002_solo_pct.bc3"), str(tmp_path / "s.bc3"),
+              "--informe", str(informe)])
+    crudo = informe.read_bytes()
+    assert crudo.startswith(b"\xef\xbb\xbf")
+    texto = crudo.decode("utf-8-sig")
+    assert "lineas_convertidas;6" in texto
+    assert "descompuestos_con_porcentual;4" in texto
+    assert "padre;codigo;motivo;rendimiento;importe" in texto
+    assert "31.04.03.01;%SUB2.5;precio_del_padre_aplicado;0,025;1100,0" in texto
+    filas = texto.split("padre;codigo;motivo;rendimiento;importe")[1].strip()
+    for fila in filas.splitlines():
+        rendimiento, importe = fila.split(";")[3:5]
+        assert "." not in rendimiento and "." not in importe
+        assert "E" not in rendimiento.upper() and "E" not in importe.upper()
+
+
+def test_f002_r22_el_cli_avisa_y_devuelve_uno_si_falta_la_entrada(tmp_path):
+    codigo = cli.main([str(FIXTURES / "f002_no_existe.bc3"),
+                       str(tmp_path / "s.bc3"),
+                       "--informe", str(tmp_path / "i.csv")])
+    assert codigo == 1
+    assert not (tmp_path / "s.bc3").exists()
+    assert not (tmp_path / "i.csv").exists()
+
+
+def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
+    salida = tmp_path / "salida.bc3"
+    codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
+                       "--informe", str(tmp_path / "i.csv"), "--sin-conversion"])
+    assert codigo == 0
+    assert salida.read_bytes() == (FIXTURES / "f002_cadena.bc3").read_bytes()
