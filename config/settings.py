@@ -41,6 +41,9 @@ class Settings:
     fill_unit_ud: bool = _env_bool("FILL_UNIT_UD", "true")
     create_clones: bool = _env_bool("CREATE_CLONES", "true")
     rewrite_bc3: bool = _env_bool("REWRITE_BC3", "true")
+    # F-002: pasada previa que convierte los descompuestos porcentuales a UD
+    # con cantidad 1. Apagada, el BC3 pasa al resto del ETL sin tocar (R21).
+    porcentuales_a_ud: bool = _env_bool("PORCENTUALES_A_UD", "true")
 
     # ---------------- Salida ----------------
     csv_sep: str = os.getenv("CSV_SEPARATOR", ";")

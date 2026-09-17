@@ -13,11 +13,13 @@ Sin red, sin BBDD y sin servicios de IA: la pasada solo lee y escribe ficheros.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from config.settings import Settings
 from infrastructure.bc3.bc3_modifier import MAX_CODE_LEN
 from infrastructure.bc3.bc3_porcentajes import (
     calcular_importes,
@@ -410,6 +412,25 @@ def test_f002_r18_las_lineas_no_afectadas_salen_identicas_byte_a_byte(tmp_path):
         assert linea in salida
     assert all(l.endswith("\r\n") for l in salida)
     assert destino.read_bytes().decode("latin-1")  # sigue siendo latin-1 legible
+
+
+# --------------------------------------------------------------------------- #
+# R21 · La bandera de configuración                                            #
+# --------------------------------------------------------------------------- #
+def test_f002_r21_la_bandera_existe_y_viene_activada_por_defecto():
+    assert Settings().porcentuales_a_ud is True
+
+
+def test_f002_r21_con_la_bandera_apagada_el_fichero_sale_identico_byte_a_byte(tmp_path):
+    ajustes = replace(Settings(), porcentuales_a_ud=False)
+    origen = FIXTURES / "f002_cadena.bc3"
+    destino = tmp_path / "copia.bc3"
+    informe = convertir_porcentuales(origen, destino,
+                                     activo=ajustes.porcentuales_a_ud)
+    assert destino.read_bytes() == origen.read_bytes()
+    assert informe.lineas_convertidas == 0
+    assert informe.conceptos_eliminados == 0
+    assert informe.casos == []
 
 
 def test_f002_r23_si_no_existe_la_entrada_lanza_filenotfound_y_no_crea_la_salida(tmp_path):
