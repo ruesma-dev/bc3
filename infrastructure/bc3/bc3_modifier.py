@@ -31,13 +31,21 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.15g}".replace(",", ".")
 
 def _shorten_code_unique(code: str,
-                         used: dict[str, str]) -> str:
+                         used: dict[str, str],
+                         *,
+                         forzar_unicidad: bool = False) -> str:
     """
     Devuelve un código BC3 <= MAX_CODE_LEN sin colisiones.
     `used` es un dict short_code -> original_code.
+
+    Con `forzar_unicidad=True` un código ya corto TAMPOCO puede repetirse: se
+    le aplica la misma escalera de desambiguación (naive → 19+último →
+    sufijo '#i'). Lo usa la pasada de porcentuales (F-002), que inventa
+    códigos de clon y no puede dar por bueno uno que ya exista. Con el valor
+    por defecto el comportamiento es el de siempre.
     """
     # Si ya es corto, lo dejamos tal cual
-    if len(code) <= MAX_CODE_LEN:
+    if len(code) <= MAX_CODE_LEN and not (forzar_unicidad and code in used):
         # Si hay duplicado exacto, asumimos que el BC3 original
         # no tiene códigos repetidos; no tocamos nada.
         return code

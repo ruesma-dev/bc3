@@ -25,7 +25,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+
+from infrastructure.bc3.bc3_modifier import (
+    MAX_CODE_LEN,
+    _format_d_triplets,
+    _shorten_code_unique,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,3 +227,228 @@ def triples_de_cuerpo(cuerpo: str) -> list[Tripleta]:
 def hay_porcentual(triples: Iterable[Tripleta],
                    es_pct: Callable[[str], bool]) -> bool:
     return any(es_pct(codigo) for codigo, _, _ in triples)
+
+
+# --------------------------------------------------------------------------- #
+# Plan de conversión (pasada 1)                                                #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LineaClon:
+    """Clon de una línea porcentual concreta de un `~D` concreto (D5)."""
+
+    indice: int          # posición de la tripleta dentro del ~D
+    codigo: str          # código del clon (R5)
+    original: str        # código del concepto porcentual sustituido
+    precio: Decimal      # importe D4 ya redondeado (R6)
+    resumen: str
+    fecha: str
+
+
+@dataclass(frozen=True)
+class PlanDescompuesto:
+    """Lo que hay que hacerle a UNA línea `~D`."""
+
+    numero_linea: int    # índice de la línea ~D dentro del fichero
+    padre: str           # código del padre tal cual viene en el ~D
+    clones: list[LineaClon]
+
+
+@dataclass
+class Plan:
+    """Todo lo que la pasada 2 necesita saber, decidido en la pasada 1."""
+
+    planes: dict[int, PlanDescompuesto] = field(default_factory=dict)
+    conceptos_a_eliminar: set[str] = field(default_factory=set)
+    remapeo_m: dict[tuple[str, str], str] = field(default_factory=dict)
+    informe: InformePorcentuales = field(default_factory=InformePorcentuales)
+
+
+def _leer_lineas(src: Path, encoding: str) -> list[str]:
+    """Líneas del BC3 CON su terminador original (R18: nada se reescribe solo)."""
+    if not src.exists():
+        raise FileNotFoundError(src)
+    return src.read_bytes().decode(encoding).splitlines(keepends=True)
+
+
+def _campos(linea: str) -> list[str]:
+    return linea.rstrip("\r\n").split("|")
+
+
+def _terminador(lineas: Sequence[str]) -> str:
+    for linea in lineas:
+        if linea.endswith("\r\n"):
+            return "\r\n"
+        if linea.endswith("\n"):
+            return "\n"
+    return "\r\n"
+
+
+def codigo_base_de_padre(padre: str) -> str:
+    """Código del padre sin la marca `#` de capítulo, que no es parte del código.
+
+    Caso real: `~D|33.03.01#|...` de El Escorial, cuyo `~M` apunta al par
+    `33.03.01\\%CC`, ya sin la marca.
+    """
+    return padre[:-1] if padre.endswith("#") else padre
+
+
+def codigo_de_clon(padre: str, ordinal: int, ocupados: dict[str, str]) -> str:
+    """`<padre>.P<n>` recortado a 20 caracteres y único (R5).
+
+    La unicidad la resuelve `_shorten_code_unique` de `bc3_modifier`, que ya
+    implementa la escalera naive → 19+último → sufijo `#i`; aquí solo se le
+    exige que mire también los códigos cortos (`forzar_unicidad`).
+    """
+    sufijo = f".P{ordinal}"
+    candidato = codigo_base_de_padre(padre)[:MAX_CODE_LEN - len(sufijo)] + sufijo
+    elegido = _shorten_code_unique(candidato, ocupados, forzar_unicidad=True)
+    ocupados[elegido] = elegido
+    return elegido
+
+
+def _indices_porcentuales(triples: Sequence[Tripleta],
+                          es_pct: Callable[[str], bool]) -> list[int]:
+    return [i for i, (codigo, _, _) in enumerate(triples) if es_pct(codigo)]
+
+
+def _base_es_indeterminada(triples: Sequence[Tripleta],
+                           hasta: int,
+                           precios: Mapping[str, Decimal | None],
+                           es_pct: Callable[[str], bool]) -> bool:
+    """R16: alguna línea previa a una porcentual no permite calcular la base."""
+    for codigo, factor, rendimiento in triples[: hasta + 1]:
+        if a_decimal(factor) is None or a_decimal(rendimiento) is None:
+            return True
+        if not es_pct(codigo) and precios.get(codigo) is None:
+            return True
+    return False
+
+
+def planificar(src: Path, encoding: str = "latin-1") -> Plan:
+    """PASADA 1: lee el fichero entero y decide qué se convierte y con qué código."""
+    lineas = _leer_lineas(Path(src), encoding)
+
+    precios: dict[str, Decimal | None] = {}
+    unidades: dict[str, str] = {}
+    resumenes: dict[str, str] = {}
+    fechas: dict[str, str] = {}
+    # Códigos ya ocupados: los ~C y TAMBIÉN su truncado a 20 (D6), porque
+    # `convert_to_material` recortará después los largos sobre ese hueco.
+    ocupados: dict[str, str] = {}
+
+    for linea in lineas:
+        if not linea.startswith("~C|"):
+            continue
+        campos = _campos(linea)
+        codigo = campos[1] if len(campos) > 1 else ""
+        if not codigo:
+            continue
+        unidades[codigo] = campos[2] if len(campos) > 2 else ""
+        resumenes[codigo] = campos[3] if len(campos) > 3 else ""
+        precios[codigo] = a_decimal(campos[4]) if len(campos) > 4 else None
+        fechas[codigo] = campos[5] if len(campos) > 5 else ""
+        ocupados[codigo] = codigo
+        ocupados[codigo[:MAX_CODE_LEN]] = codigo
+
+    def es_pct(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades.get(codigo, ""))
+
+    plan = Plan()
+    informe = plan.informe
+
+    for numero, linea in enumerate(lineas):
+        if not linea.startswith("~D|"):
+            continue
+        campos = _campos(linea)
+        padre = campos[1] if len(campos) > 1 else ""
+        triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
+        indices = _indices_porcentuales(triples, es_pct)
+        if not indices:
+            continue
+
+        informe.descompuestos += 1
+        primer_pct = triples[indices[0]]
+
+        if _base_es_indeterminada(triples, indices[-1], precios, es_pct):
+            # R16: el ~D entero se queda como está y sus conceptos % se conservan.
+            informe.anota(padre, primer_pct[0], MOTIVO_BASE_INDETERMINADA,
+                          a_decimal(primer_pct[2]) or 0, 0)
+            logger.info("~D %s sin convertir: base indeterminada", padre)
+            continue
+
+        # R9: todas las líneas son porcentuales y el padre trae precio ≠ 0.
+        base_inicial: Decimal | None = None
+        precio_padre = precios.get(padre)
+        if precio_padre is None:
+            precio_padre = precios.get(codigo_base_de_padre(padre))
+        if len(indices) == len(triples) and precio_padre not in (None, Decimal(0)):
+            base_inicial = redondear_centimos(precio_padre)
+
+        importes = calcular_importes(triples, precios, es_pct,
+                                     redondear=True, base_inicial=base_inicial)
+
+        if base_inicial is not None:
+            informe.anota(padre, primer_pct[0], MOTIVO_PRECIO_PADRE,
+                          a_decimal(primer_pct[2]) or 0, importes[indices[0]])
+            logger.info("~D %s: el clon de %s recibe el precio del padre (%s)",
+                        padre, primer_pct[0], base_inicial)
+
+        clones: list[LineaClon] = []
+        for ordinal, indice in enumerate(indices, start=1):
+            hijo = triples[indice][0]
+            codigo_nuevo = codigo_de_clon(padre, ordinal, ocupados)
+            clones.append(
+                LineaClon(
+                    indice=indice,
+                    codigo=codigo_nuevo,
+                    original=hijo,
+                    precio=importes[indice],
+                    resumen=resumenes.get(hijo) or hijo,
+                    fecha=fechas.get(hijo, ""),
+                )
+            )
+            plan.remapeo_m[(codigo_base_de_padre(padre), hijo)] = codigo_nuevo
+            informe.lineas_convertidas += 1
+
+        plan.planes[numero] = PlanDescompuesto(numero, padre, clones)
+
+    _decidir_conceptos_a_eliminar(lineas, plan, es_pct)
+    return plan
+
+
+def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
+                                  plan: Plan,
+                                  es_pct: Callable[[str], bool]) -> None:
+    """R13/R14: un concepto `%` se borra solo si ya no lo referencia ningún `~D`."""
+    referenciado_por: dict[str, str] = {}
+    for numero, linea in enumerate(lineas):
+        if not linea.startswith("~D|"):
+            continue
+        campos = _campos(linea)
+        padre = campos[1] if len(campos) > 1 else ""
+        triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
+        convertidos = ({c.indice for c in plan.planes[numero].clones}
+                       if numero in plan.planes else set())
+        for indice, (codigo, _, _) in enumerate(triples):
+            if indice not in convertidos:
+                referenciado_por.setdefault(codigo, padre)
+
+    porcentuales = set()
+    for linea in lineas:
+        if not linea.startswith("~C|"):
+            continue
+        campos = _campos(linea)
+        codigo = campos[1] if len(campos) > 1 else ""
+        if codigo and es_pct(codigo):
+            porcentuales.add(codigo)
+
+    for codigo in sorted(porcentuales):
+        if codigo in referenciado_por:
+            # R14: sigue vivo en alguna tripleta sin convertir; se conserva.
+            plan.informe.anota(referenciado_por[codigo], codigo,
+                               MOTIVO_CONCEPTO_CONSERVADO, 0, 0)
+            logger.info("concepto %s conservado: lo referencia aún %s",
+                        codigo, referenciado_por[codigo])
+        else:
+            plan.conceptos_a_eliminar.add(codigo)
+    plan.informe.conceptos_eliminados = len(plan.conceptos_a_eliminar)
