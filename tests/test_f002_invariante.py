@@ -185,9 +185,11 @@ BC3_DE_INPUT = sorted(ENTRADAS.glob("*.bc3")) if ENTRADAS.is_dir() else []
 def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, tmp_path):
     origen = ENTRADAS / nombre
     destino = tmp_path / nombre
+    antes = origen.read_bytes()
     convertir_porcentuales(origen, destino)
     assert comparar_invariante(origen, destino) == []
-    assert origen.read_bytes() == (ENTRADAS / nombre).read_bytes()  # input/ no se toca
+    # `input/` es de solo lectura: la pasada no puede haber escrito en él.
+    assert origen.read_bytes() == antes
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
