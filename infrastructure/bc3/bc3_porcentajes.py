@@ -151,8 +151,13 @@ def decimales_saneados(valor: object) -> int:
 
 
 def redondear(valor: Decimal, decimales: int) -> Decimal:
-    """Redondeo a `decimales` posiciones con ROUND_HALF_UP (R6)."""
-    return valor.quantize(Decimal(1).scaleb(-decimales), rounding=ROUND_HALF_UP)
+    """Redondeo a `decimales` posiciones con ROUND_HALF_UP (R6).
+
+    `quantize` solo mira el EXPONENTE del patrón, así que lo que importa aquí
+    es el `-decimales`, no el coeficiente: se escribe como exponente para que
+    se lea igual que se piensa.
+    """
+    return valor.quantize(Decimal(f"1e-{decimales}"), rounding=ROUND_HALF_UP)
 
 
 def formatear_precio(valor: Decimal, decimales: int) -> str:

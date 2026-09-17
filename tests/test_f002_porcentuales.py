@@ -993,6 +993,23 @@ def test_f002_r22_el_cli_avisa_y_devuelve_uno_si_falta_la_entrada(tmp_path):
     assert not (tmp_path / "i.csv").exists()
 
 
+def test_f002_r6_el_cli_acepta_los_decimales_por_linea_de_ordenes(tmp_path):
+    """`--decimales` manda sobre el `.env`, que es como se prueba un valor."""
+    salida = tmp_path / "salida.bc3"
+    informe = tmp_path / "informe.csv"
+    codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
+                       "--informe", str(informe), "--decimales", "2"])
+    assert codigo == 0
+    lineas = leer(salida)
+    assert _registro(lineas, "~C|43.15.P1|").split("|")[4] == "12.35"
+    assert "decimales_del_precio;2" in informe.read_bytes().decode("utf-8-sig")
+
+    por_defecto = tmp_path / "defecto.bc3"
+    cli.main([str(FIXTURES / "f002_cadena.bc3"), str(por_defecto),
+              "--informe", str(tmp_path / "i2.csv")])
+    assert _registro(leer(por_defecto), "~C|43.15.P1|").split("|")[4] == "12.354"
+
+
 def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
     salida = tmp_path / "salida.bc3"
     codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
