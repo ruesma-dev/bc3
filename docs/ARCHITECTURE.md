@@ -32,16 +32,24 @@ Hexagonal, con el flujo de la FASE 1 montado como pipeline de steps:
 - `domain/` — registros FIEBDC-3 (`domain/bc3/records.py`) y modelos de
   presupuesto. Sin dependencias externas.
 - `application/pipeline/` — `Pipeline`, `ETLContext` y los steps, en este
-  orden: `ResolveInputStep` → `TransformBC3Step` → `BuildTreeStep` →
+  orden: `ResolveInputStep` → `ConvertirPorcentualesStep` (opcional, bandera
+  `PORCENTUALES_A_UD`) → `TransformBC3Step` → `BuildTreeStep` →
   `PrintTreeStep` (opcional) → `ExportCsvStep` (opcional).
 - `application/services/` — `build_tree_service` (árbol + clones),
   `export_csv_service`, `parse_bc3_service`, `phase2_code_mapper` (FASE 2) y
   `budget_bc3_batch_service` (troceado en lotes hacia el clasificador).
 - `infrastructure/bc3/bc3_modifier.py` — la transformación real del fichero,
   en dos pasadas (ver abajo).
+- `infrastructure/bc3/bc3_porcentajes.py` — pasada previa e independiente
+  (`.bc3` → `.bc3`, F-002) que convierte los descompuestos porcentuales a
+  `UD` con cantidad 1 materializando el importe que calcula Presto. Corre
+  ANTES de `convert_to_material` y su salida alimenta al resto del ETL;
+  también se puede lanzar sola con
+  `python -m interface_adapters.cli.porcentuales_cli entrada.bc3 salida.bc3`.
 - `infrastructure/clients/`, `infrastructure/ai/` — clientes del servicio
   clasificador y de Gemini.
-- `interface_adapters/` — `run_etl` (controlador) y la GUI Tkinter.
+- `interface_adapters/` — `run_etl` y `construir_pipeline` (controlador), la
+  GUI Tkinter y `cli/porcentuales_cli.py`.
 - `config/settings.py` — `Settings`, dataclass **congelada** (`frozen=True`):
   para variar un valor se clona con `dataclasses.replace`, no se asigna.
 

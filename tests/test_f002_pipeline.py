@@ -60,6 +60,14 @@ def test_f002_el_step_deja_la_ruta_preprocesada_en_el_contexto(tmp_path):
     assert "~C|%SUB25|" not in texto
 
 
+def test_f002_el_step_crea_la_carpeta_de_salida_aunque_falte_su_padre(tmp_path):
+    """`output/` puede no existir todavía la primera vez que se ejecuta el ETL."""
+    ctx = _contexto(tmp_path / "entregas" / "f002")
+    ConvertirPorcentualesStep().run(ctx)
+    assert ctx.preprocessed_path is not None
+    assert ctx.preprocessed_path.exists()
+
+
 def test_f002_transform_usa_la_ruta_preprocesada_cuando_existe(tmp_path, monkeypatch):
     recibidas = _espiar_convert_to_material(monkeypatch)
     ctx = _contexto(tmp_path)

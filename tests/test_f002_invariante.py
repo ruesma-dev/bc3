@@ -159,7 +159,7 @@ def test_f002_r19_permutar_las_tripletas_de_la_entrada_rompe_el_invariante(tmp_p
     entrada.write_bytes(permutado.encode("latin-1"))
     destino = tmp_path / "salida.bc3"
     convertir_porcentuales(entrada, destino)
-    clon = [l for l in _lineas(destino) if l.startswith("~C|43.15.P1|")][0]
+    clon = next(l for l in _lineas(destino) if l.startswith("~C|43.15.P1|"))
     # Con el porcentual el primero su base es 0, no 49,416.
     assert _campos(clon)[4] == "0"
 

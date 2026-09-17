@@ -79,7 +79,9 @@ class InformePorcentuales:
     casos: list[CasoPorcentual] = field(default_factory=list)
 
     def anota(self, padre: str, codigo: str, motivo: str,
-              rendimiento: Decimal | float = 0, importe: Decimal | float = 0) -> None:
+              rendimiento: Decimal | float, importe: Decimal | float) -> None:
+        """Añade una fila excepcional. Los cinco datos son obligatorios: una
+        fila del informe sin rendimiento ni importe no le sirve a nadie."""
         self.casos.append(
             CasoPorcentual(
                 padre=padre,
@@ -340,7 +342,8 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
         if not linea.startswith("~C|"):
             continue
         campos = _campos(linea)
-        codigo = campos[1] if len(campos) > 1 else ""
+        # `campos[1]` existe siempre: la línea empieza por "~C|".
+        codigo = campos[1]
         if not codigo:
             continue
         unidades[codigo] = campos[2] if len(campos) > 2 else ""
@@ -360,7 +363,7 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
         if not linea.startswith("~D|"):
             continue
         campos = _campos(linea)
-        padre = campos[1] if len(campos) > 1 else ""
+        padre = campos[1]  # existe siempre: la línea empieza por "~D|"
         triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
         indices = _indices_porcentuales(triples, es_pct)
         if not indices:
@@ -425,7 +428,7 @@ def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
         if not linea.startswith("~D|"):
             continue
         campos = _campos(linea)
-        padre = campos[1] if len(campos) > 1 else ""
+        padre = campos[1]  # existe siempre: la línea empieza por "~D|"
         triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
         convertidos = ({c.indice for c in plan.planes[numero].clones}
                        if numero in plan.planes else set())
@@ -438,7 +441,7 @@ def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
         if not linea.startswith("~C|"):
             continue
         campos = _campos(linea)
-        codigo = campos[1] if len(campos) > 1 else ""
+        codigo = campos[1]  # existe siempre: la línea empieza por "~C|" o "~T|"
         if codigo and es_pct(codigo):
             porcentuales.add(codigo)
 
@@ -477,7 +480,8 @@ def _reescribir_d(linea: str, descompuesto: PlanDescompuesto) -> str:
     cierre `\\|` lo garantiza `_format_d_triplets` de `bc3_modifier` (R17).
     """
     campos = _campos(linea)
-    triples = triples_de_cuerpo(campos[2] if len(campos) > 2 else "")
+    # Si hay plan es que la pasada 1 leyó tripletas aquí: campos[2] existe.
+    triples = triples_de_cuerpo(campos[2])
     por_indice = {clon.indice: clon for clon in descompuesto.clones}
     tripletas = [
         f"{por_indice[i].codigo}\\1\\1" if i in por_indice else "\\".join(triple)
@@ -489,9 +493,7 @@ def _reescribir_d(linea: str, descompuesto: PlanDescompuesto) -> str:
 
 def _remapear_m(linea: str, remapeo: Mapping[tuple[str, str], str]) -> str:
     """R15: un `~M` sobre el par `padre\\porcentual` pasa a apuntar al clon."""
-    campos = _campos(linea)
-    if len(campos) < 2:
-        return linea
+    campos = _campos(linea)  # campos[1] existe: la línea empieza por "~M|"
     par = campos[1].split("\\")
     if len(par) != 2:
         return linea
@@ -539,7 +541,7 @@ def convertir_porcentuales(src: Path,
         borrando = False
         if linea.startswith(("~C|", "~T|")):
             campos = _campos(linea)
-            codigo = campos[1] if len(campos) > 1 else ""
+            codigo = campos[1]  # existe siempre: la línea empieza por "~C|" o "~T|"
             if codigo in plan.conceptos_a_eliminar:
                 # R13: el concepto porcentual ya no lo referencia nadie.
                 borrando = True

@@ -30,8 +30,8 @@ from utils.timer import Stopwatch
 
 def construir_pipeline(settings: Settings,
                        *,
-                       show_tree: bool = True,
-                       export_csv: bool = True) -> Pipeline:
+                       show_tree: bool,
+                       export_csv: bool) -> Pipeline:
     """Composición del pipeline: aquí, en el punto de entrada, y no en los steps.
 
     `ConvertirPorcentualesStep` (F-002) va entre la resolución de la entrada y
