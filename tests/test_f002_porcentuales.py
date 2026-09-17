@@ -268,6 +268,30 @@ def test_f002_r5_planificar_evita_el_truncado_a_veinte_de_un_codigo_largo():
     assert len(elegido) <= MAX_CODE_LEN
 
 
+def test_f002_r5_la_linea_de_base_es_el_ordinal_cero_de_la_misma_familia(tmp_path):
+    """`.P0` se recorta y se desambigua igual que `.P1`, y se reserva antes."""
+    ocupados: dict[str, str] = {}
+    assert codigo_de_clon("05.06.29", 0, ocupados) == "05.06.29.P0"
+    largo = codigo_de_clon("RUESMA-C32.04.07.01", 0, {})
+    assert largo == "RUESMA-C32.04.07..P0"
+    assert len(largo) <= MAX_CODE_LEN
+
+    entrada = tmp_path / "base_codigo_largo.bc3"
+    entrada.write_bytes(
+        ("~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||\r\n"
+         "~C|RUESMA-C32.04.07.01|Ud|APLIQUES DE TERRAZA|103|071123|0|\r\n"
+         "~C|RUESMA-C32.04.07..P0|Ud|CONCEPTO QUE YA OCUPA LA BASE|5|071123|0|\r\n"
+         "~C|%TRES||RECARGO DEL 3|3|071123|0|\r\n"
+         "~D|RUESMA-C32.04.07.01|%TRES\\1\\0.03\\|\r\n").encode("latin-1")
+    )
+    plan = planificar(entrada)
+    descompuesto = plan.planes[next(iter(plan.planes))]
+    assert descompuesto.base is not None
+    assert descompuesto.base.codigo != "RUESMA-C32.04.07..P0"  # ya estaba cogido
+    assert len(descompuesto.base.codigo) <= MAX_CODE_LEN
+    assert descompuesto.base.codigo != descompuesto.clones[0].codigo
+
+
 def test_f002_r5_planificar_no_repite_ningun_codigo_de_clon():
     plan = planificar(FIXTURES / "f002_codigo_largo.bc3")
     todos = [c for lista in _clones_por_padre(plan).values() for c in lista]

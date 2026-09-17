@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
@@ -42,8 +42,9 @@ UNIDAD_CLON = "UD"
 TIPO_CLON = "3"
 MARCA_PORCENTUAL = "%"
 
-# Motivos de las filas excepcionales del informe (R9, R14, R16).
-MOTIVO_PRECIO_PADRE = "precio_del_padre_aplicado"
+# Motivos de las filas excepcionales del informe (R9, R9 ter, R14, R16).
+MOTIVO_BASE_RECONSTRUIDA = "base_reconstruida"
+MOTIVO_BASE_NO_DESPEJABLE = "base_no_despejable"
 MOTIVO_BASE_INDETERMINADA = "base_indeterminada"
 MOTIVO_CONCEPTO_CONSERVADO = "concepto_conservado"
 
@@ -195,21 +196,17 @@ def calcular_importes(triples: Sequence[Tripleta],
       fichero de salida. Es el modo con el que se calculan los precios de clon.
     - `redondear=False` deja el encadenado exacto: es como se mide la ENTRADA
       al comprobar el invariante de R19.
-    - `base_inicial` fuerza el precio de la primera línea porcentual de un
-      descompuesto cuyas líneas son todas porcentuales (R9).
+    - `base_inicial` arranca el acumulado de D3 en ese valor en vez de en 0:
+      es la base reconstruida de un `~D` cuyas líneas son todas porcentuales
+      (R9), que viaja al fichero como una línea propia `<padre>.P0`.
     """
     importes: list[Decimal] = []
-    base = Decimal(0)
-    primera_pct = True
+    base = base_inicial if base_inicial is not None else Decimal(0)
     for codigo, factor, rendimiento in triples:
         if es_pct(codigo):
-            if primera_pct and base_inicial is not None:
-                importe = base_inicial
-            else:
-                importe = importe_porcentual(factor, rendimiento, base)
+            importe = importe_porcentual(factor, rendimiento, base)
             if redondear:
                 importe = redondear_centimos(importe)
-            primera_pct = False
         else:
             importe = importe_linea(precios.get(codigo), factor, rendimiento)
         importes.append(importe)
@@ -243,11 +240,17 @@ class LineaClon:
 
 @dataclass(frozen=True)
 class PlanDescompuesto:
-    """Lo que hay que hacerle a UNA línea `~D`."""
+    """Lo que hay que hacerle a UNA línea `~D`.
+
+    `base` solo existe en los `~D` de R9: es la línea `<padre>.P0` con la base
+    reconstruida, que va DELANTE de las porcentuales y no sustituye a ninguna
+    tripleta de la entrada (por eso su `indice` es -1).
+    """
 
     numero_linea: int    # índice de la línea ~D dentro del fichero
     padre: str           # código del padre tal cual viene en el ~D
     clones: list[LineaClon]
+    base: LineaClon | None = None
 
 
 @dataclass
@@ -306,6 +309,25 @@ def codigo_de_clon(padre: str, ordinal: int, ocupados: dict[str, str]) -> str:
 def _indices_porcentuales(triples: Sequence[Tripleta],
                           es_pct: Callable[[str], bool]) -> list[int]:
     return [i for i, (codigo, _, _) in enumerate(triples) if es_pct(codigo)]
+
+
+def _producto_de_factores(triples: Sequence[Tripleta]) -> Decimal | None:
+    """`Π(1 + r_i)` de un `~D` solo-porcentual, o None si no se puede despejar.
+
+    R9 ter: un `(1 + r_i)` de 0 o negativo —un descuento del −100 % o mayor—
+    hace la división imposible o absurda, así que ese `~D` se queda intacto.
+    """
+    producto = Decimal(1)
+    for _, factor, rendimiento in triples:
+        f = a_decimal(factor)
+        r = a_decimal(rendimiento)
+        if f is None or r is None:
+            return None
+        paso = Decimal(1) + f * r
+        if paso <= 0:
+            return None
+        producto *= paso
+    return producto
 
 
 def _base_es_indeterminada(triples: Sequence[Tripleta],
@@ -379,17 +401,33 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
         precio_padre = precios.get(padre)
         if precio_padre is None:
             precio_padre = precios.get(codigo_base_de_padre(padre))
-        if len(indices) == len(triples) and precio_padre not in (None, Decimal(0)):
-            base_inicial = redondear_centimos(precio_padre)
+        solo_porcentuales = (len(indices) == len(triples)
+                             and precio_padre not in (None, Decimal(0)))
+        if solo_porcentuales:
+            producto = _producto_de_factores(triples)
+            if producto is None:
+                # R9 ter: algún (1 + r) ≤ 0; la base no se puede despejar.
+                informe.anota(padre, primer_pct[0], MOTIVO_BASE_NO_DESPEJABLE,
+                              a_decimal(primer_pct[2]) or 0, 0)
+                logger.info("~D %s sin convertir: base no despejable", padre)
+                continue
+            base_inicial = redondear_centimos(precio_padre / producto)
 
         importes = calcular_importes(triples, precios, es_pct,
                                      redondear=True, base_inicial=base_inicial)
 
+        # La línea de base se reserva ANTES que las porcentuales para que se
+        # quede con el `.P0` natural (R5) y encabece la familia en Presto.
+        linea_base: LineaClon | None = None
         if base_inicial is not None:
-            informe.anota(padre, primer_pct[0], MOTIVO_PRECIO_PADRE,
-                          a_decimal(primer_pct[2]) or 0, importes[indices[0]])
-            logger.info("~D %s: el clon de %s recibe el precio del padre (%s)",
-                        padre, primer_pct[0], base_inicial)
+            linea_base = LineaClon(
+                indice=-1,
+                codigo=codigo_de_clon(padre, 0, ocupados),
+                original=padre,
+                precio=base_inicial,  # R9 bis lo ajusta con el residuo
+                resumen=resumenes.get(padre) or padre,
+                fecha=fechas.get(padre, ""),
+            )
 
         clones: list[LineaClon] = []
         for ordinal, indice in enumerate(indices, start=1):
@@ -408,7 +446,19 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
             plan.remapeo_m[(codigo_base_de_padre(padre), hijo)] = codigo_nuevo
             informe.lineas_convertidas += 1
 
-        plan.planes[numero] = PlanDescompuesto(numero, padre, clones)
+        if linea_base is not None:
+            # R9 bis: el residuo de redondeo se absorbe aquí, nunca retocando
+            # una línea porcentual, así que la suma del ~D es exactamente P.
+            resto = precio_padre - sum((c.precio for c in clones), Decimal(0))
+            linea_base = replace(linea_base, precio=redondear_centimos(resto))
+            informe.anota(padre, linea_base.codigo, MOTIVO_BASE_RECONSTRUIDA,
+                          producto, linea_base.precio)
+            logger.info(
+                "~D %s: base reconstruida %s a partir del precio del padre %s",
+                padre, linea_base.precio, precio_padre,
+            )
+
+        plan.planes[numero] = PlanDescompuesto(numero, padre, clones, linea_base)
 
     _decidir_conceptos_a_eliminar(lineas, plan, es_pct)
     return plan
@@ -482,6 +532,9 @@ def _reescribir_d(linea: str, descompuesto: PlanDescompuesto) -> str:
         f"{por_indice[i].codigo}\\1\\1" if i in por_indice else "\\".join(triple)
         for i, triple in enumerate(triples)
     ]
+    if descompuesto.base is not None:
+        # R9: la base reconstruida encabeza el ~D, con factor 1 y rendimiento 1.
+        tripletas.insert(0, f"{descompuesto.base.codigo}\\1\\1")
     texto = _format_d_triplets(campos[1], tripletas)
     return texto[:-1] + _terminador_de(linea)
 
@@ -544,7 +597,10 @@ def convertir_porcentuales(src: Path,
 
         if numero in plan.planes:
             descompuesto = plan.planes[numero]
-            salida.extend(_linea_c_de_clon(c, terminador) for c in descompuesto.clones)
+            emitidos = list(descompuesto.clones)
+            if descompuesto.base is not None:
+                emitidos.insert(0, descompuesto.base)
+            salida.extend(_linea_c_de_clon(c, terminador) for c in emitidos)
             salida.append(_reescribir_d(linea, descompuesto))
             continue
 
