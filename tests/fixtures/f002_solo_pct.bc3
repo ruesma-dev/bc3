@@ -1,0 +1,13 @@
+~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||
+~C|31.04.03.01|u|HORNACINA PARA CONTADOR GENERAL|1100|171224|0|
+~C|%SUB2.5|||2.5|171224|0|
+~D|31.04.03.01|%SUB2.5\1\0.025\|
+~C|32.03.04.32|u|FAROLA IP66 IK10 4M 4000K|1117.65|171224|0|
+~C|%SUB17|||17|171224|0|
+~D|32.03.04.32|%SUB17\1\0.17\|
+~C|ICV260|Ud.|Regulador de caudal de aire constante RCR-05, 400x200|291.5|150626|0|
+~C|ICV270|Ud.|Regulador de caudal de aire constante RCR-06, 500x250|369.5|150626|0|
+~C|%%jefedeobrayencayGF4%||14 mesesx 12.000|11.78|150626|0|
+~C|%%beneficioseinsa||beneficio SEINSA|15.4|150626|0|
+~D|ICV260|%%jefedeobrayencayGF4%\1\0.1178\%%beneficioseinsa\1\0.154\|
+~D|ICV270|%%jefedeobrayencayGF4%\1\0.1178\%%beneficioseinsa\1\0.154\|

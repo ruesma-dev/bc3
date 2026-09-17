@@ -189,6 +189,9 @@ logs/
 *.env
 *.ENV
 *.bc3
+# Excepción: las fixtures de test son BC3 mínimos (una decena de líneas) que
+# los tests necesitan versionados. Los presupuestos reales siguen fuera.
+!tests/fixtures/*.bc3
 *.png
 *.xlsx
 
