@@ -687,8 +687,11 @@ def test_f002_las_piezas_del_plan_son_inmutables():
     plan = planificar(FIXTURES / "f002_negativo.bc3")
     descompuesto = plan.planes[next(iter(plan.planes))]
     clon = descompuesto.clones[0]
+    con_base = planificar(FIXTURES / "f002_solo_pct_doble.bc3")
+    base = con_base.planes[next(iter(con_base.planes))].base
     caso = CasoPorcentual("p", "c", "m", 0.0, 0.0)
     for objeto, campo, valor in ((clon, "precio", Decimal("1")),
+                                 (base, "precio", Decimal("1")),
                                  (descompuesto, "padre", "otro"),
                                  (caso, "importe", 1.0)):
         with pytest.raises(FrozenInstanceError):

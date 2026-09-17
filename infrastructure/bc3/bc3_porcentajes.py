@@ -239,18 +239,32 @@ class LineaClon:
 
 
 @dataclass(frozen=True)
+class LineaBase:
+    """Línea de base reconstruida de un `~D` solo-porcentual (R9).
+
+    No sustituye a ninguna tripleta de la entrada —se añade delante de las
+    porcentuales—, así que no tiene ni índice ni concepto original: solo lo que
+    hace falta para escribir su `~C` y su tripleta `codigo\1\1`.
+    """
+
+    codigo: str          # <padre>.P0 (R5)
+    precio: Decimal      # P − Σ importes porcentuales (R9 bis)
+    resumen: str
+    fecha: str
+
+
+@dataclass(frozen=True)
 class PlanDescompuesto:
     """Lo que hay que hacerle a UNA línea `~D`.
 
     `base` solo existe en los `~D` de R9: es la línea `<padre>.P0` con la base
-    reconstruida, que va DELANTE de las porcentuales y no sustituye a ninguna
-    tripleta de la entrada (por eso su `indice` es -1).
+    reconstruida, que va DELANTE de las porcentuales.
     """
 
     numero_linea: int    # índice de la línea ~D dentro del fichero
     padre: str           # código del padre tal cual viene en el ~D
     clones: list[LineaClon]
-    base: LineaClon | None = None
+    base: LineaBase | None = None
 
 
 @dataclass
@@ -418,12 +432,10 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
 
         # La línea de base se reserva ANTES que las porcentuales para que se
         # quede con el `.P0` natural (R5) y encabece la familia en Presto.
-        linea_base: LineaClon | None = None
+        linea_base: LineaBase | None = None
         if base_inicial is not None:
-            linea_base = LineaClon(
-                indice=-1,
+            linea_base = LineaBase(
                 codigo=codigo_de_clon(padre, 0, ocupados),
-                original=padre,
                 precio=base_inicial,  # R9 bis lo ajusta con el residuo
                 resumen=resumenes.get(padre) or padre,
                 fecha=fechas.get(padre, ""),
@@ -510,8 +522,8 @@ def _terminador_de(linea: str) -> str:
     return linea[len(linea.rstrip("\r\n")):]
 
 
-def _linea_c_de_clon(clon: LineaClon, terminador: str) -> str:
-    """`~C` del clon: unidad UD, precio = importe D4, tipo 3 (R4)."""
+def _linea_c_de_clon(clon: LineaClon | LineaBase, terminador: str) -> str:
+    """`~C` de un clon o de una línea de base: unidad UD, tipo 3 (R4)."""
     return (
         f"~C|{clon.codigo}|{UNIDAD_CLON}|{clon.resumen}|"
         f"{formatear_precio(clon.precio)}|{clon.fecha}|{TIPO_CLON}|{terminador}"
