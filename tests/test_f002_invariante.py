@@ -1,0 +1,174 @@
+# tests/test_f002_invariante.py
+"""F-002 · R19 · El importe de cada descompuesto no se mueve.
+
+La comparación es ENTRADA contra SALIDA, `~D` a `~D`: nunca contra el precio
+del `~C` del padre, porque hay padres con el precio puesto a mano que no cuadra
+con su propio descompuesto (`170100`, `1701010`, `07.02.01a`; ver
+`progress/explore_porcentuales.md` §2b) y eso haría fallar la suite por un dato
+que ya venía torcido.
+
+Quedan fuera los `~D` cuyas líneas son TODAS porcentuales: ahí R9 cambia el
+importe a propósito (el clon toma el precio del padre) y el informe los lista
+uno a uno.
+
+Sin red, sin BBDD y sin servicios de IA. Los ficheros de `input/` se leen en
+modo lectura y la salida se escribe siempre en el `tmp_path` del test.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from infrastructure.bc3.bc3_porcentajes import (
+    a_decimal,
+    calcular_importes,
+    convertir_porcentuales,
+    es_porcentual,
+    triples_de_cuerpo,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures"
+ENTRADAS = Path(__file__).resolve().parents[1] / "input"
+
+# R9: los cuatro descompuestos solo-porcentuales reales, con el precio que su
+# ~C trae puesto a mano y que el clon de su primera línea hereda.
+SOLO_PORCENTUALES = {
+    "31.04.03.01": Decimal("1100.00"),
+    "32.03.04.32": Decimal("1117.65"),
+    "ICV260": Decimal("291.50"),
+    "ICV270": Decimal("369.50"),
+}
+
+
+def _campos(linea: str) -> list[str]:
+    return linea.rstrip("\r\n").split("|")
+
+
+def _lineas(ruta: Path) -> list[str]:
+    return ruta.read_bytes().decode("latin-1").splitlines()
+
+
+def _unidades_y_precios(lineas: list[str]):
+    unidades: dict[str, str] = {}
+    precios: dict[str, Decimal | None] = {}
+    for linea in lineas:
+        if not linea.startswith("~C|"):
+            continue
+        campos = _campos(linea)
+        codigo = campos[1] if len(campos) > 1 else ""
+        if not codigo:
+            continue
+        unidades[codigo] = campos[2] if len(campos) > 2 else ""
+        precios[codigo] = a_decimal(campos[4]) if len(campos) > 4 else None
+    return unidades, precios
+
+
+def _descompuestos(lineas: list[str]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    salida = []
+    for linea in lineas:
+        if not linea.startswith("~D|"):
+            continue
+        campos = _campos(linea)
+        salida.append((campos[1], triples_de_cuerpo(campos[2] if len(campos) > 2 else "")))
+    return salida
+
+
+def _importe_total(triples, precios, es_pct) -> Decimal:
+    return sum(calcular_importes(triples, precios, es_pct), Decimal(0))
+
+
+def comparar_invariante(origen: Path, destino: Path) -> list[str]:
+    """Devuelve la lista de `~D` que se salen de la tolerancia de R19."""
+    entrada, salida = _lineas(origen), _lineas(destino)
+    unidades_e, precios_e = _unidades_y_precios(entrada)
+    unidades_s, precios_s = _unidades_y_precios(salida)
+
+    def pct_entrada(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades_e.get(codigo, ""))
+
+    def pct_salida(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades_s.get(codigo, ""))
+
+    des_e, des_s = _descompuestos(entrada), _descompuestos(salida)
+    assert len(des_e) == len(des_s), "la pasada no puede añadir ni quitar ~D"
+
+    desviados: list[str] = []
+    for (padre_e, triples_e), (padre_s, triples_s) in zip(des_e, des_s):
+        assert padre_e == padre_s, f"~D descolocado: {padre_e} vs {padre_s}"
+        porcentuales = [t for t in triples_e if pct_entrada(t[0])]
+        if not porcentuales:
+            continue
+        if len(porcentuales) == len(triples_e):
+            continue  # R9: cambia a propósito, va listado en el informe
+        antes = _importe_total(triples_e, precios_e, pct_entrada)
+        despues = _importe_total(triples_s, precios_s, pct_salida)
+        tolerancia = Decimal("0.01") + Decimal("0.005") * len(porcentuales)
+        if abs(antes - despues) > tolerancia:
+            desviados.append(f"{padre_e}: {antes} -> {despues} (tol {tolerancia})")
+    return desviados
+
+
+# --------------------------------------------------------------------------- #
+# R19 sobre las fixtures                                                       #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("fixture", sorted(p.name for p in FIXTURES.glob("f002_*.bc3")))
+def test_f002_r19_el_importe_de_cada_descompuesto_se_conserva(fixture, tmp_path):
+    origen = FIXTURES / fixture
+    destino = tmp_path / fixture
+    convertir_porcentuales(origen, destino)
+    assert comparar_invariante(origen, destino) == []
+
+
+def test_f002_r19_los_descompuestos_solo_porcentuales_se_listan_en_el_informe(tmp_path):
+    informe = convertir_porcentuales(
+        FIXTURES / "f002_solo_pct.bc3", tmp_path / "salida.bc3"
+    )
+    casos = {c.padre: c for c in informe.casos
+             if c.motivo == "precio_del_padre_aplicado"}
+    assert set(casos) == set(SOLO_PORCENTUALES)
+    for padre, precio in SOLO_PORCENTUALES.items():
+        assert Decimal(str(casos[padre].importe)) == precio
+
+
+def test_f002_r19_permutar_dos_tripletas_del_descompuesto_cambia_el_resultado():
+    """El invariante no es una tautología: depende del ORDEN de las líneas."""
+    precios = {"OPTIMIZADOR MPP": Decimal("41.18"), "%SUB25": Decimal("25")}
+
+    def es_pct(codigo: str) -> bool:
+        return es_porcentual(codigo, "")
+
+    en_orden = [("OPTIMIZADOR MPP", "1", "1.2"), ("%SUB25", "1", "0.25")]
+    permutado = list(reversed(en_orden))
+    assert _importe_total(en_orden, precios, es_pct) == Decimal("61.77")
+    assert _importe_total(permutado, precios, es_pct) == Decimal("49.416")
+
+
+def test_f002_r19_permutar_las_tripletas_de_la_entrada_rompe_el_invariante(tmp_path):
+    """Si la pasada ignorase el orden, este test no vería la diferencia."""
+    origen = FIXTURES / "f002_cadena.bc3"
+    texto = origen.read_bytes().decode("latin-1")
+    permutado = texto.replace(
+        "~D|43.15|OPTIMIZADOR MPP\\1\\1.2\\%SUB25\\1\\0.25\\",
+        "~D|43.15|%SUB25\\1\\0.25\\OPTIMIZADOR MPP\\1\\1.2\\",
+    )
+    assert permutado != texto
+    entrada = tmp_path / "permutado.bc3"
+    entrada.write_bytes(permutado.encode("latin-1"))
+    destino = tmp_path / "salida.bc3"
+    convertir_porcentuales(entrada, destino)
+    clon = [l for l in _lineas(destino) if l.startswith("~C|43.15.P1|")][0]
+    # Con el porcentual el primero su base es 0, no 49,416.
+    assert _campos(clon)[4] == "0"
+
+
+def test_f002_r19_la_pasada_es_idempotente(tmp_path):
+    for fixture in sorted(FIXTURES.glob("f002_*.bc3")):
+        primera = tmp_path / f"1_{fixture.name}"
+        segunda = tmp_path / f"2_{fixture.name}"
+        convertir_porcentuales(fixture, primera)
+        informe = convertir_porcentuales(primera, segunda)
+        assert primera.read_bytes() == segunda.read_bytes(), fixture.name
+        assert informe.lineas_convertidas == 0 or fixture.name == "f002_sin_precio.bc3"
