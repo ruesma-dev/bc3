@@ -18,6 +18,7 @@ from application.pipeline import steps as modulo_steps
 from application.pipeline.pipeline import ETLContext
 from application.pipeline.steps import ConvertirPorcentualesStep, TransformBC3Step
 from config.settings import Settings
+from interface_adapters.controllers.etl_controller import construir_pipeline
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -79,3 +80,17 @@ def test_f002_r21_con_la_bandera_apagada_el_step_no_preprocesa_nada(tmp_path):
     ConvertirPorcentualesStep().run(ctx)
     assert ctx.preprocessed_path is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_f002_r21_el_step_solo_entra_en_el_pipeline_si_la_bandera_esta_activa(tmp_path):
+    con_bandera = construir_pipeline(_contexto(tmp_path).settings,
+                                     show_tree=False, export_csv=False)
+    sin_bandera = construir_pipeline(
+        _contexto(tmp_path, porcentuales_a_ud=False).settings,
+        show_tree=False, export_csv=False,
+    )
+    tipos_con = [type(s).__name__ for s in con_bandera.steps]
+    tipos_sin = [type(s).__name__ for s in sin_bandera.steps]
+    assert tipos_con.index("ConvertirPorcentualesStep") == 1
+    assert tipos_con.index("ConvertirPorcentualesStep") < tipos_con.index("TransformBC3Step")
+    assert "ConvertirPorcentualesStep" not in tipos_sin

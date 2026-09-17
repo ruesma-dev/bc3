@@ -19,12 +19,33 @@ from config.settings import Settings
 from application.pipeline.pipeline import Pipeline, ETLContext
 from application.pipeline.steps import (
     ResolveInputStep,
+    ConvertirPorcentualesStep,
     TransformBC3Step,
     BuildTreeStep,
     PrintTreeStep,
     ExportCsvStep,
 )
 from utils.timer import Stopwatch
+
+
+def construir_pipeline(settings: Settings,
+                       *,
+                       show_tree: bool = True,
+                       export_csv: bool = True) -> Pipeline:
+    """Composición del pipeline: aquí, en el punto de entrada, y no en los steps.
+
+    `ConvertirPorcentualesStep` (F-002) va entre la resolución de la entrada y
+    la transformación a material, y solo entra si la bandera está activa (R21).
+    """
+    pipeline = Pipeline().add(ResolveInputStep())
+    if settings.porcentuales_a_ud:
+        pipeline.add(ConvertirPorcentualesStep())
+    pipeline.add(TransformBC3Step()).add(BuildTreeStep())
+    if show_tree:
+        pipeline.add(PrintTreeStep())
+    if export_csv:
+        pipeline.add(ExportCsvStep())
+    return pipeline
 
 
 def run_etl(
@@ -50,11 +71,7 @@ def run_etl(
         settings = replace(settings, input_filename=input_filename)
 
     # 2) Construir pipeline según flags
-    pipeline = Pipeline().add(ResolveInputStep()).add(TransformBC3Step()).add(BuildTreeStep())
-    if show_tree:
-        pipeline.add(PrintTreeStep())
-    if export_csv:
-        pipeline.add(ExportCsvStep())
+    pipeline = construir_pipeline(settings, show_tree=show_tree, export_csv=export_csv)
 
     # 3) Ejecutar
     ctx = ETLContext(settings=settings)
