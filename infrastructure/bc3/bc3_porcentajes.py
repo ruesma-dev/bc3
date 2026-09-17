@@ -316,14 +316,14 @@ def _producto_de_factores(triples: Sequence[Tripleta]) -> Decimal | None:
 
     R9 ter: un `(1 + r_i)` de 0 o negativo —un descuento del −100 % o mayor—
     hace la división imposible o absurda, así que ese `~D` se queda intacto.
+
+    Los números ya vienen validados: `_base_es_indeterminada` corre antes y
+    manda a R16 cualquier `~D` con un factor o un rendimiento ilegible, así que
+    aquí `a_decimal` no puede devolver None.
     """
     producto = Decimal(1)
     for _, factor, rendimiento in triples:
-        f = a_decimal(factor)
-        r = a_decimal(rendimiento)
-        if f is None or r is None:
-            return None
-        paso = Decimal(1) + f * r
+        paso = Decimal(1) + a_decimal(factor) * a_decimal(rendimiento)
         if paso <= 0:
             return None
         producto *= paso
