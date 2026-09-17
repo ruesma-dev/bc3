@@ -158,20 +158,21 @@ presupuesto y el precio de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`.
 |---|---|
 | Tests ejecutados | **445 pasan, 1 skip** (`python -m pytest tests -q`); **98** son de F-002 |
 | Cobertura de las líneas cambiadas | **98,1 %** (357/364, umbral 80 %, nivel `critico`) |
-| Mutantes / supervivientes | **156 generados, 156 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (`python -m harness.mutacion --feature F-002`, 352,4 s, SHA `49722f4`) → `progress/mutacion_F-002.md` |
+| Mutantes / supervivientes | **156 generados, 156 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (`python -m harness.mutacion --feature F-002`, 324,9 s, SHA `e4aaffe` = HEAD) → `progress/mutacion_F-002.md` |
 | Tiempo de ejecución de la suite | **42,7 s** (los 98 de F-002, 4,7 s) |
 | `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución tras cerrar T14) |
 
 ### Supervivientes: los tres asaltos de la campaña
 
-La campaña se lanzó tres veces; el informe de disco es el de la tercera, que
-es la que vale (su SHA es el de HEAD).
+La campaña se lanzó cuatro veces; el informe de disco es el de la cuarta, que
+es la que vale: su SHA es exactamente el de HEAD.
 
 | Campaña | Mutantes | Supervivientes | Qué eran |
 |---|---|---|---|
 | 1ª (`465165e`) | 174 | 62 | huecos reales de test + guardas de código inalcanzable |
 | 2ª (`897d3e7`) | 156 | 3 | los tres `mkdir(parents=True)` |
-| **3ª (`49722f4`)** | **156** | **0** | — |
+| 3ª (`49722f4`) | 156 | 0 | — |
+| **4ª (`e4aaffe`, la de disco)** | **156** | **0** | relanzada tras reforzar un test |
 
 Cómo se cerraron, por familias (ninguno quedó justificado «a mano»):
 
