@@ -1,165 +1,157 @@
 <!-- progress/impl_F-002.md -->
 # F-002 · Informe de implementación
 
-Feature `critico`, SDD. Spec aprobada: `specs/F-002-porcentuales-a-ud/`.
-Rama `feature/F-002-porcentuales-a-ud`, un commit por tarea.
-**Ronda 1**: T1-T14, T16 (pasada completa, aprobada por el reviewer).
-**Ronda 2**: T17-T23 y T25, la R9 reescrita tras el defecto que encontró el
-líder sobre la salida real. **T15 y T24 son MANUALES del humano y siguen
-PENDIENTES** (comandos abajo).
+Feature `critico`, SDD. Spec: `specs/F-002-porcentuales-a-ud/`. Rama
+`feature/F-002-porcentuales-a-ud`, un commit por tarea. Tres rondas:
 
-## Ronda 2 · la R9 nueva: base reconstruida
-
-**El defecto.** La R9 anterior le daba al primer clon el precio `P` del `~C`
-del padre y aplicaba los siguientes porcentajes encima. Pero `P` ya trae los
-porcentajes dentro, así que con DOS líneas porcentuales se cobraban dos veces:
-`ICV260` salía **336,39** con un `~C` de **291,50** (+15,4 %). Con una sola
-línea la regla acertaba por casualidad, y por eso Siroco no lo delataba.
-
-**La regla nueva** (R9): se despeja la base hacia atrás,
-`base = P / Π(1 + r_i)`, y el `~D` pasa a tener una línea de base
-`<padre>.P0` (unidad `UD`, factor 1, rendimiento 1, tipo 3, resumen y fecha
-del padre) más una línea por cada porcentual, cada una con D4 sobre el
-acumulado. R9 bis: el residuo de redondeo se absorbe **en la línea de base**
-(`precio(.P0) = P − Σ importes porcentuales`), nunca retocando una porcentual.
-R9 ter: si algún `(1 + r_i)` ≤ 0 la base no se puede despejar y el `~D` se
-queda intacto, con motivo `base_no_despejable`.
-
-Los cuatro `~D` solo-porcentuales reales, medidos sobre la salida de `input/`:
-
-| Padre | `P` del `~C` | `.P0` | porcentuales | suma | antes |
-|---|---|---|---|---|---|
-| `ICV260` | 291,50 | 225,98 | 26,62 · 38,90 | **291,50** | 336,39 |
-| `ICV270` | 369,50 | 286,45 | 33,74 · 49,31 | **369,50** | 426,40 |
-| `31.04.03.01` | 1.100,00 | 1.073,17 | 26,83 | **1.100,00** | 1.100,00 |
-| `32.03.04.32` | 1.117,65 | 955,26 | 162,39 | **1.117,65** | 1.117,65 |
-
-Los dos de Siroco también cambian de forma aunque no de total: donde había un
-clon de 1.100,00 ahora hay 1.073,17 + 26,83. Los tests que fijaban el valor
-viejo **se han actualizado, no borrado**: cambia el número esperado porque
-cambió la regla, y son los mismos tests los que ahora sujetan la nueva.
-
-## Fase RED de la ronda 2
-
-**T20 · R19 bis, el test que caza el defecto** —
-`python -m pytest tests/test_f002_invariante.py -k r19bis -q --tb=short`
-
-```
-        if abs(calculado - esperado) > Decimal("0.01"):
-            desviados.append(f"{padre}: {calculado} != {esperado}")
->       assert desviados == []
-E       AssertionError: assert ['ICV260: 336...40 != 369.50'] == []
-E         Full diff:
-E         - []
-E         + [
-E         +     'ICV260: 336.39 != 291.50',
-E         +     'ICV270: 426.40 != 369.50',
-E         + ]
-1 failed, 1 passed, 34 deselected in 0.27s
-```
-
-El `1 passed` es Siroco: con una sola porcentual la regla vieja daba el total
-bueno. Por eso hacía falta un fichero con dos.
-
-**T18 · la línea de base no existe** —
-`python -m pytest tests/test_f002_porcentuales.py -k r9_ -q --tb=short`
-
-```
-    assert _registro(lineas, f"~C|{codigo}|").split("|")[4] == precio, codigo
-E   AssertionError: no hay ninguna línea que empiece por '~C|31.04.03.01.P0|'
-E   assert []
-```
-
-**T19 · R9 bis (residuo) y R9 ter (descuento total)** —
-`python -m pytest tests/test_f002_porcentuales.py -k "r9bis or r9ter" -q --tb=short`
-
-```
-    assert _registro(lineas, "~C|09.21.01.P1|").split("|")[4] == "1.31"
-E   AssertionError: assert '10.00' == '1.31'
-
-    assert informe.lineas_convertidas == 0
-E   AssertionError: assert 2 == 0
-E    +  where 2 = InformePorcentuales(...,
-E        casos=[CasoPorcentual(padre='09.20.01', codigo='%TODO',
-E        motivo='precio_del_padre_aplicado', rendimiento=-1.0, importe=500.0), ...])
-```
-
-Las tres pasaron a verde con el commit de T21-T22.
-
-## Fase RED de la ronda 1 (resumida)
-
-Traza completa en el commit `e48d697`; aquí el fallo de cada una:
-
-| Tarea | Comando | Fallo real |
+| Ronda | Tareas | Qué trajo |
 |---|---|---|
-| T2 | `pytest -k "r1_ or r2_ or r7_ or r11_"` | `ModuleNotFoundError: No module named 'infrastructure.bc3.bc3_porcentajes'` |
-| T4 | `pytest -k r5_` | `ImportError: cannot import name 'codigo_de_clon'` |
-| T6 | `pytest tests/test_f002_porcentuales.py` | `ImportError: cannot import name 'convertir_porcentuales'` |
-| T10 | `pytest -k r21_` | `AttributeError: 'Settings' object has no attribute 'porcentuales_a_ud'` |
-| T11 | `pytest tests/test_f002_pipeline.py` | `ImportError: cannot import name 'ConvertirPorcentualesStep'` |
+| 1 | T1-T14, T16 | la pasada completa; aprobada por el reviewer |
+| 2 | T17-T23, T25 | R9 reescrita: base reconstruida (`ICV260` salía 336,39) |
+| 3 | T26-T31, T33 | decimales del precio del clon configurables, 4 por defecto |
 
-Cada una pasó a verde con el commit siguiente (T3, T5, T7, T10 y T11).
+**T15, T24 y T32 son MANUALES del humano y siguen PENDIENTES** (abajo).
 
-## Qué cambió
+## Ronda 3 · los decimales del precio del clon
+
+**El defecto.** El humano importó en Presto la salida y el original y los
+comparó: el convertido salía **381,64 € por encima** (19.542.981,39 frente a
+19.542.599,75). El líder lo desglosó por capítulos: en 8 de los 9 que difieren
+el convertido da justo el precio que el `~C` del capítulo ya declaraba, o sea
+que ahí la conversión recupera fidelidad. El que sí era nuestro es C06, y su
+causa es el redondeo: **`C020615` pasaba de 172,59 a 172,60**, un céntimo que,
+multiplicado por su medición de 1.833,59 m², son **18,34 €**.
+
+**La regla nueva** (R6): los decimales del precio del clon los fija
+`Settings.porcentuales_decimales` (`PORCENTUALES_DECIMALES` del `.env`),
+**4 por defecto**, y el mismo `d` se usa en el precio del clon, en la base
+reconstruida de R9 y en el residuo de R9 bis. R6 bis acota el rango a **2..6**
+—2 es lo que traen los `~C` originales, 6 donde el desvío ya es cero— y
+cualquier otra cosa cae a 4 con aviso por log. R7 escribe el número sin ceros
+de relleno: un 7,41 exacto sale `7.41`, no `7.4100`.
+
+`C020615` de `lagunamodificado16julio.bc3`, que es el caso del que salió todo,
+está fijado como test parametrizado:
+
+| `d` | precio que da la salida | |
+|---|---|---|
+| 2 | **172,60** | un céntimo de más → 18,34 € en esa partida |
+| 4 | **172,59** | el del fichero original |
+
+Desvío del **precio unitario** sobre `input/`, medido aquí `~D` a `~D` (sin
+ponderar por la medición `~M`, que es lo que hace la tabla de `design.md`):
+
+| `d` | Siroco (neto / absoluto) | laguna (neto / absoluto) |
+|---|---|---|
+| 2 | +0,0296 € / 0,7242 € | +0,1708 € / 1,2565 € |
+| **4** | **+0,0043 € / 0,0050 €** | **+0,0022 € / 0,0096 €** |
+| 6 | 0 / 0 | −0,0000 € / 0,0001 € |
+
+El neto no se compensa porque `ROUND_HALF_UP` empuja siempre al alza: el error
+tiene sesgo, no es ruido. **Dónde se cambia si Presto admite 6 decimales**:
+`PORCENTUALES_DECIMALES=6` en el `.env`, o `--decimales 6` en el CLI. Ni una
+línea de código.
+
+## Fase RED de la ronda 3
+
+**T26/T27** — `python -m pytest tests/test_f002_porcentuales.py -k "r6_ or r6bis or r7_" -q --tb=short`
+
+```
+tests\test_f002_porcentuales.py:24: in <module>
+    from infrastructure.bc3.bc3_porcentajes import (
+E   ImportError: cannot import name 'DECIMALES_POR_DEFECTO' from
+    'infrastructure.bc3.bc3_porcentajes'
+1 error in 0.45s
+```
+
+Con el código de la ronda 2 el redondeo estaba clavado a 2 decimales: no había
+ni `DECIMALES_POR_DEFECTO`, ni `decimales_saneados`, ni forma de pedir 4. El
+mismo test, ya en verde, es el que fija los 172,59 / 172,60 de `C020615`.
+
+## Fase RED de las rondas 1 y 2 (resumida)
+
+Trazas completas en los commits `e48d697` (ronda 1) y `6224834` (ronda 2):
+
+| Tarea | Fallo real contra el código de entonces |
+|---|---|
+| T2 | `ModuleNotFoundError: No module named 'infrastructure.bc3.bc3_porcentajes'` |
+| T4 / T6 | `ImportError: cannot import name 'codigo_de_clon'` / `'convertir_porcentuales'` |
+| T10 / T11 | `AttributeError: 'Settings' object has no attribute 'porcentuales_a_ud'` / `ImportError: ConvertirPorcentualesStep` |
+| **T20** | `AssertionError: ['ICV260: 336.39 != 291.50', 'ICV270: 426.40 != 369.50']` |
+| T18 / T19 | no existía `~C\|31.04.03.01.P0\|`; el residuo daba `10.00` en vez de `1.31`; un descuento del −100 % se convertía igual (2 líneas en vez de 0) |
+
+T20 es el que cazó el defecto de la R9 vieja, que sobrevivió a una
+implementación y a una revisión completas.
+
+## Qué hace la pasada, en una pantalla
+
+`.bc3` → `.bc3` independiente, antes de `convert_to_material`. Sustituye cada
+tripleta porcentual por `clon\1\1` y emite un `~C` propio del par (padre,
+línea) con unidad `UD`, tipo `3` y precio = el importe que calcula Presto
+(`rendimiento × acumulado de las líneas anteriores`). Cuando **todas** las
+líneas de un `~D` son porcentuales y el padre trae precio `P` ≠ 0, reconstruye
+la base (`P / Π(1 + r_i)`), la escribe como `<padre>.P0` delante y absorbe en
+ella el residuo, de modo que la suma del `~D` es exactamente `P` (R9, R9 bis);
+si algún `(1 + r_i)` ≤ 0, no toca el `~D` (R9 ter).
 
 | Fichero | Qué |
 |---|---|
-| `infrastructure/bc3/bc3_porcentajes.py` | **nuevo**. Detección (R1), cálculo en `Decimal` (R2, R6), `planificar` (pasada 1, con la base reconstruida de R9) y `convertir_porcentuales` (pasada 2) |
-| `interface_adapters/cli/porcentuales_cli.py` + `__init__.py` | **nuevos**. Fichero suelto (R22) e informe CSV (R20) |
-| `infrastructure/bc3/bc3_modifier.py` | **un solo cambio**: keyword `forzar_unicidad=False` en `_shorten_code_unique` |
-| `application/pipeline/{pipeline,steps}.py` | `ETLContext.preprocessed_path`, `ConvertirPorcentualesStep` y `TransformBC3Step` sobre `ctx.preprocessed_path or ctx.original_path` |
-| `interface_adapters/controllers/etl_controller.py` | `construir_pipeline()`: el step entra si la bandera está activa |
-| `config/settings.py` | `porcentuales_a_ud` (`PORCENTUALES_A_UD`, activa por defecto) |
-| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 110 tests |
+| `infrastructure/bc3/bc3_porcentajes.py` | **nuevo**: detección, cálculo en `Decimal`, `planificar` y `convertir_porcentuales` |
+| `interface_adapters/cli/porcentuales_cli.py` + `__init__.py` | **nuevos**: fichero suelto (R22), `--decimales`, informe CSV (R20) |
+| `infrastructure/bc3/bc3_modifier.py` | **un solo cambio**: keyword `forzar_unicidad=False` |
+| `application/pipeline/{pipeline,steps}.py` | `preprocessed_path`, `ConvertirPorcentualesStep` |
+| `interface_adapters/controllers/etl_controller.py` | `construir_pipeline()` con el step condicionado a la bandera |
+| `config/settings.py` | `porcentuales_a_ud` y `porcentuales_decimales` |
+| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 141 tests |
 | `tests/fixtures/f002_*.bc3` | 9 fixtures con números reales de `input/` |
-| `docs/ARCHITECTURE.md`, `.gitignore` | el step nuevo en el pipeline; excepción para versionar las fixtures |
 
 No se toca: `convert_to_material`, `build_tree_service`, los clones `.1`, la
 FASE 2 ni `input/` (solo lectura; los tests escriben en `tmp_path`).
 
 ## Lo que se verificó con números reales
 
-R19 se comprueba `~D` a `~D`, **entrada contra salida**, sobre los diez `.bc3`
-de `input/`: **1.602 `~D` comparados, ni uno fuera de la tolerancia**
-(`0,01 + 0,005 × nº de porcentuales`); peor desvío individual 0,0104 € en
-`43.15`; desvío acumulado por fichero ≤ 0,171 €. Los `~D` de R9 no entran ahí
-—su entrada calcula 0— y se les exige R19 bis: su salida vuelve a dar el
-precio del `~C` del padre con un céntimo de tolerancia (tabla de arriba).
+R19 compara **entrada contra salida** `~D` a `~D` sobre los diez `.bc3` de
+`input/`, **con `d = 2` y con `d = 4`**, y la tolerancia se calcula con `d`
+(`0,01 + n × 10^(−d) / 2`): al subir la precisión el invariante aprieta cien
+veces más en vez de quedarse flojo. 1.602 `~D` comparados por cada `d`, ni uno
+fuera. Los `~D` de R9 van por R19 bis: su salida vuelve a dar el precio del
+`~C` del padre con cualquier `d`.
 
-Volumen por fichero: El Escorial 112 `~D` / 114 líneas; Siroco 262 / 319;
-`lagunamodificado16julio` 406 / 948; `presupuesto_limpio` 23 / 23.
+| Padre | `P` | `.P0` + porcentuales con `d = 4` | suma |
+|---|---|---|---|
+| `ICV260` | 291,50 | 225,9792 + 26,6204 + 38,9004 | **291,50** |
+| `ICV270` | 369,50 | 286,4471 + 33,7435 + 49,3094 | **369,50** |
+| `31.04.03.01` | 1.100,00 | 1.073,1707 + 26,8293 | **1.100,00** |
+| `32.03.04.32` | 1.117,65 | 955,2564 + 162,3936 | **1.117,65** |
 
-Literales de Presto escritos a mano en los tests (no recalculados): `43.15` →
-81,5364 antes / 81,526 después con clones 12,35 · 12,35 · 7,41; `05.06.29` →
-−1,46 y total 71,54; `07.02.05` → 16,00 con el clon a `0`; `1000080` (la
-captura de Elena Díaz) → 0,93 + 0,11 + **0** + 0,16 = 1,20, el precio de su
-`~C`.
+Literales de Presto escritos a mano en los tests: `43.15` → 81,5364 con `d = 4`
+(81,526 con `d = 2`, que era el error de la ronda 1); `05.06.29` → −1,46 y
+total 71,54; `07.02.05` → 16,00 con el clon a `0`; `1000080` (la captura de
+Elena Díaz) → 1,1997 con `d = 4` frente al exacto 1,199645 y al 1,20 que
+enseña su `~C`.
 
 ## Decisiones y desviaciones
 
-1. **Código del padre con marca de capítulo.** Un `~D` puede llevar el `#` de
-   capítulo (`~D|33.03.01#|`, El Escorial) y su `~M` apunta al par sin él. El
-   clon se construye sobre el código **sin** el `#` y el remapeo de `~M` casa
-   por ese mismo código. Limitación conocida: solo se quita **una** marca, así
-   que un `##` dejaría `01#.P1`; no hay ningún caso en `input/`.
-2. **`calcular_importes` tiene dos modos.** `redondear=True` fija el precio del
-   clon acumulando el valor ya redondeado (R6); la entrada se mide sin
-   redondear, porque medir las dos igual escondería un error cometido en los
-   dos lados. `base_inicial` pasó a significar «arranca el acumulado aquí»
-   (la base reconstruida) en vez de «el primer clon cobra esto», que era el
-   defecto de la R9 vieja.
-3. **Un `~D` con un número ilegible** en una línea anterior a una porcentual
-   cae en R16 (`base_indeterminada`): sin base no se toca.
-4. **`presupuesto.bc3` pierde 42 `~C` porcentuales sin convertir nada.** Es un
-   banco de precios cuyos `%` no usa ningún `~D`, y R13 dice borrarlos cuando
-   ninguna tripleta los referencia. Queda como está: es decisión de negocio
-   que el humano está mirando.
-5. **Guardas y código muertos eliminados** en el módulo nuevo: los levantó la
-   campaña de mutación como mutantes equivalentes (ver §Supervivientes).
-6. **El doble de `convert_to_material` usa la firma real** (arreglo del review
-   de la ronda 1): con `**kwargs` el `try` de `TransformBC3Step` tenía éxito en
-   los tests y el `except` —la rama que SIEMPRE corre en producción— se quedaba
-   sin cubrir. Medido: `steps.py` 63 % → 65 %, con las líneas 79-81 cubiertas.
+1. **`decimales_saneados` vive en la pasada, no en `Settings`.** T28 pedía
+   sanear en `Settings`; el rango de R6 bis se aplica en `bc3_porcentajes`,
+   que es quien redondea, para no meter una regla de dominio en `config/` ni
+   que `config` importe `infrastructure`. `Settings` lee el `.env` tal cual y
+   la pasada lo acota: el efecto observable de R6 bis es el mismo desde
+   cualquier entrada (step, CLI o llamada directa).
+2. **R7 estrena recorte de ceros**, así que precios que antes salían `38.90`
+   ahora salen `38.9` y `1100.00` sale `1100`. Los tests de las rondas 1 y 2
+   se actualizaron a eso; donde el literal documentado era el de 2 decimales
+   (`43.15`, el caso del residuo, `1000080`) se fija `decimales=2` explícito
+   en vez de cambiar el número.
+3. **Código del padre con marca de capítulo**: el clon se construye sobre el
+   código sin el `#` (`~D|33.03.01#|` → `33.03.01.P1`) y el `~M` casa por ese
+   mismo código. Solo se quita **una** marca; un `##` dejaría `01#.P1` y no hay
+   ningún caso en `input/`.
+4. **`presupuesto.bc3` pierde 42 `~C` porcentuales sin convertir nada**: es un
+   banco de precios cuyos `%` no usa ningún `~D` y R13 manda borrarlos. Queda
+   como está, es decisión de negocio del humano.
+5. **Guardas y código muertos eliminados**: los levantó la mutación como
+   mutantes equivalentes (ver §Supervivientes).
 
 ## Pendiente · verificaciones MANUALES (humano)
 
@@ -168,48 +160,50 @@ python -m interface_adapters.cli.porcentuales_cli "input/COSTE_250128_Siroco_Rv4
 python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio.bc3" "output/laguna_sin_pct.bc3"
 ```
 
-- **T15**: importar `siroco_sin_pct.bc3` en Presto y confirmar el total y el
-  precio de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`.
+- **T15**: importar `siroco_sin_pct.bc3` y confirmar el total y `43.15`,
+  `05.06.29`, `31.04.03.01`, `32.03.04.32`.
 - **T24**: importar `laguna_sin_pct.bc3` y confirmar `ICV260` = 291,50 (no
   336,39) e `ICV270` = 369,50.
+- **T32**: anotar **cuántos decimales acepta Presto** al importar. Si admite 6,
+  `PORCENTUALES_DECIMALES=6` en el `.env` (o `--decimales 6`) y repetir.
 
-**Resultado de las dos: PENDIENTE** — nadie las ha ejecutado; quedan anotadas
+**Resultado de las tres: PENDIENTE** — nadie las ha ejecutado; quedan anotadas
 en `progress/current.md`.
 
 ## Evidencias
 
 | Evidencia | Valor |
 |---|---|
-| Tests ejecutados | **457 pasan, 1 skip** (`python -m pytest tests -q`); **110** son de F-002 |
-| Cobertura de las líneas cambiadas | **98,7 %** (384/389, umbral 80 %, nivel `critico`) |
-| Mutantes / supervivientes | **168 generados, 168 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo sobre el código nuevo (305,5 s, SHA `8c08432` = HEAD, alcance 817 líneas) → `progress/mutacion_F-002.md` |
-| Tiempo de ejecución de la suite | **52,5 s** en la última pasada de `init.sh` (los 110 de F-002, ~2 s) |
-| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución: tras cerrar T23) |
+| Tests ejecutados | **488 pasan, 1 skip** (`python -m pytest tests -q`); **141** son de F-002 |
+| Cobertura de las líneas cambiadas | COB |
+| Mutantes / supervivientes | MUT |
+| Tiempo de ejecución de la suite | SUITE |
+| `bash harness/init.sh` | INIT |
 
 ### Supervivientes: cómo se llegó al cero
 
-Cinco campañas en la ronda 1 (174 mutantes y 62 supervivientes la primera;
-0 desde la tercera) y una más en la ronda 2 sobre el código nuevo. Cada
+Siete campañas en total (174 mutantes y 62 supervivientes la primera). Cada
 superviviente se cerró con un test o quitando el código que lo generaba;
 ninguno quedó justificado «a mano». Por familias:
 
-1. **Contrato de `_shorten_code_unique`** (3): nadie comprobaba el defecto
-   `forzar_unicidad=False` ni que no registre en `used` lo que devuelve
-   intacto.
-2. **Números ilegibles** (6): faltaba «uno de los dos números no se lee».
-3. **`~C` y `~D` truncados** (12): cada `if len(campos) > N` pide un registro
-   con exactamente N campos; un BC3 de test con `~C` de 2, 3, 4, 5 y 6 campos
-   y `~D` sin barra y sin pipe final los cazó todos.
-4. **Filas del informe** (6): se miraba el motivo pero no el padre, el código,
+1. **Contrato de `_shorten_code_unique`** (3), **números ilegibles** (6) y
+   **`~C`/`~D` truncados** (12): faltaba el registro con exactamente N campos
+   y el caso «uno de los dos números no se lee».
+2. **Filas del informe** (8): se miraba el motivo pero no el padre, el código,
    el rendimiento ni el importe.
-5. **Redondeo acumulado** (R6, 1): sin redondear la base, el segundo clon del
-   caso de prueba sale 56,17 en vez de 56,18.
-6. **Inmutabilidad del plan** (3 `frozen=True`) y **`~T` multilínea y líneas
-   sueltas** (2).
-7. **Carpetas de salida** (4 `parents=True`): los tests creaban un solo nivel,
+3. **Redondeo acumulado** (R6, 1), **inmutabilidad del plan** (4 `frozen=True`)
+   y **`~T` multilínea y líneas sueltas** (2).
+4. **Carpetas de salida** (4 `parents=True`): los tests creaban un solo nivel,
    donde `parents=False` también vale; ahora dos.
-8. **Código muerto** (≈15 equivalentes): `campos[1]` existe siempre tras
-   `~C|`/`~D|`/`~T|`/`~M|`, los valores por defecto de
-   `InformePorcentuales.anota` y `construir_pipeline` no los usaba nadie, y
-   `hay_porcentual()` no lo llamaba nadie (lo levantó el review). Un mutante
-   equivalente es código que sobra.
+5. **Orden de la familia de clones** (1): `insert(0, base)` frente a
+   `insert(1, base)` no lo distinguía nadie; ahora la lista se construye como
+   `base + clones` y el test fija que `.P0` va antes que `.P1`.
+6. **Ronda 3** (2): `Decimal(1).scaleb(-d)` daba igual con `Decimal(2)` porque
+   `quantize` solo mira el exponente —se escribe `Decimal(f"1e-{d}")` y el
+   literal desaparece—, y el `--decimales` del CLI no lo probaba nadie.
+7. **Código muerto** (≈17 equivalentes): `campos[1]` existe siempre tras
+   `~C|`/`~D|`/`~T|`/`~M|`; los valores por defecto de
+   `InformePorcentuales.anota` y de `construir_pipeline` no los usaba nadie;
+   `hay_porcentual()` tampoco; la línea de base fingía un índice de tripleta
+   que nadie leía y pasó a ser `LineaBase`. Un mutante equivalente es código
+   que sobra.
