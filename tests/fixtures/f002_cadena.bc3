@@ -7,3 +7,9 @@
 ~T|%SUB25|Descuento de subcontrata del 25 %
 segunda línea del texto del concepto porcentual
 ~D|43.15|OPTIMIZADOR MPP\1\1.2\%SUB25\1\0.25\%SUB20\1\0.2\%SUB10\1\0.1\|
+~C|1000080|m|Zocalo perimetral 150x10 mm (50m)|1.2|150626|0|
+~C|1000080.1|m|Zocalo perimetral 150x10 mm (50m)|0.93|150626|1|
+~C|%%jefedeobrayencayGF4%||14 mesesx 12.000|11.78|150626|0|
+~C|%%gastosfinancieros||seinsa 4%|0|150626|0|
+~C|%%beneficioseinsa||beneficio SEINSA|15.4|150626|0|
+~D|1000080|1000080.1\1\1\%%jefedeobrayencayGF4%\1\0.1178\%%gastosfinancieros\1\0\%%beneficioseinsa\1\0.154\|

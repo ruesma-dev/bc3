@@ -16,10 +16,13 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from infrastructure.bc3.bc3_modifier import MAX_CODE_LEN
 from infrastructure.bc3.bc3_porcentajes import (
     calcular_importes,
     codigo_de_clon,
+    convertir_porcentuales,
     es_porcentual,
     formatear_precio,
     importe_linea,
@@ -236,3 +239,171 @@ def test_f002_r5_planificar_no_repite_ningun_codigo_de_clon():
     assert all(len(c) <= MAX_CODE_LEN for c in todos)
     # El padre sin colisiones se queda con el código natural.
     assert "09.01.04.P1" in todos
+
+
+# --------------------------------------------------------------------------- #
+# Reescritura del fichero (R3, R4, R6, R9, R10, R12-R18, R23)                  #
+# --------------------------------------------------------------------------- #
+def _convertir(tmp_path, nombre: str):
+    """Ejecuta la pasada sobre una fixture y devuelve (líneas, informe, ruta)."""
+    destino = tmp_path / f"salida_{nombre}"
+    informe = convertir_porcentuales(FIXTURES / nombre, destino)
+    return leer(destino), informe, destino
+
+
+def leer(ruta: Path) -> list[str]:
+    return ruta.read_bytes().decode("latin-1").splitlines()
+
+
+def _registro(lineas: list[str], prefijo: str) -> str:
+    coincidencias = [l for l in lineas if l.startswith(prefijo)]
+    assert coincidencias, f"no hay ninguna línea que empiece por {prefijo!r}"
+    return coincidencias[0]
+
+
+def test_f002_r3_la_tripleta_porcentual_queda_como_clon_con_factor_y_rendimiento_uno(tmp_path):
+    lineas, _, _ = _convertir(tmp_path, "f002_cadena.bc3")
+    assert _registro(lineas, "~D|43.15|") == (
+        "~D|43.15|OPTIMIZADOR MPP\\1\\1.2\\43.15.P1\\1\\1\\43.15.P2\\1\\1\\"
+        "43.15.P3\\1\\1\\|"
+    )
+
+
+def test_f002_r3_las_tripletas_no_porcentuales_salen_con_su_texto_original(tmp_path):
+    lineas, _, _ = _convertir(tmp_path, "f002_ceros.bc3")
+    assert _registro(lineas, "~D|07.02.05|") == (
+        "~D|07.02.05|IMPALF\\1\\0\\IMPASF\\1\\0\\07.02.05.P1\\1\\1\\impv\\1\\2\\|"
+    )
+
+
+def test_f002_r4_el_clon_lleva_unidad_ud_tipo_3_y_la_fecha_y_el_resumen_del_original(tmp_path):
+    lineas, _, _ = _convertir(tmp_path, "f002_negativo.bc3")
+    clon = _registro(lineas, "~C|05.06.29.P1|")
+    campos = clon.split("|")
+    assert campos[2] == "UD"
+    assert campos[3] == "Descuento vidrio sin intercalario de Pvc (WE)"
+    assert campos[4] == "-1.46"
+    assert campos[5] == "200220"
+    assert campos[6] == "3"
+
+
+def test_f002_r6_los_precios_de_clon_de_43_15_son_12_35_12_35_y_7_41(tmp_path):
+    lineas, _, _ = _convertir(tmp_path, "f002_cadena.bc3")
+    assert _registro(lineas, "~C|43.15.P1|").split("|")[4] == "12.35"
+    assert _registro(lineas, "~C|43.15.P2|").split("|")[4] == "12.35"
+    assert _registro(lineas, "~C|43.15.P3|").split("|")[4] == "7.41"
+
+
+def test_f002_r9_los_cuatro_descompuestos_solo_porcentuales_toman_el_precio_del_padre(tmp_path):
+    lineas, informe, _ = _convertir(tmp_path, "f002_solo_pct.bc3")
+    esperado = {
+        "31.04.03.01.P1": "1100.00",
+        "32.03.04.32.P1": "1117.65",
+        "ICV260.P1": "291.50",
+        "ICV270.P1": "369.50",
+    }
+    for codigo, precio in esperado.items():
+        assert _registro(lineas, f"~C|{codigo}|").split("|")[4] == precio
+    # Las porcentuales siguientes se aplican sobre ese precio.
+    assert _registro(lineas, "~C|ICV260.P2|").split("|")[4] == "44.89"
+    assert _registro(lineas, "~C|ICV270.P2|").split("|")[4] == "56.90"
+    padres = {c.padre for c in informe.casos if c.motivo == "precio_del_padre_aplicado"}
+    assert padres == {"31.04.03.01", "32.03.04.32", "ICV260", "ICV270"}
+
+
+def test_f002_r10_base_cero_con_una_linea_normal_detras_da_precio_cero(tmp_path):
+    lineas, informe, _ = _convertir(tmp_path, "f002_ceros.bc3")
+    assert _registro(lineas, "~C|07.02.05.P1|").split("|")[4] == "0"
+    # R9 no aplica: el ~D tiene líneas no porcentuales.
+    assert not [c for c in informe.casos if c.motivo == "precio_del_padre_aplicado"]
+
+
+def test_f002_r12_el_porcentual_con_rendimiento_cero_se_convierte_con_precio_cero(tmp_path):
+    """1000080 de lagunamodificado16julio: 0,93 + 0,11 + 0 + 0,16 = 1,20."""
+    lineas, _, _ = _convertir(tmp_path, "f002_cadena.bc3")
+    assert _registro(lineas, "~C|1000080.P2|").split("|")[4] == "0"
+    assert _registro(lineas, "~C|1000080.P1|").split("|")[4] == "0.11"
+    assert _registro(lineas, "~C|1000080.P3|").split("|")[4] == "0.16"
+    descompuesto = _registro(lineas, "~D|1000080|")
+    assert "%%gastosfinancieros" not in descompuesto
+    precios = [
+        Decimal(_registro(lineas, f"~C|1000080.P{n}|").split("|")[4] or "0")
+        for n in (1, 2, 3)
+    ]
+    assert Decimal("0.93") + sum(precios) == Decimal("1.20")
+
+
+def test_f002_r13_desaparecen_el_c_y_el_t_del_porcentual_que_ya_no_se_usa(tmp_path):
+    lineas, informe, _ = _convertir(tmp_path, "f002_cadena.bc3")
+    for codigo in ("%SUB25", "%SUB20", "%SUB10"):
+        assert not [l for l in lineas if l.startswith(f"~C|{codigo}|")]
+    assert not [l for l in lineas if l.startswith("~T|%SUB25|")]
+    # El ~T era multilínea: su continuación tampoco puede quedarse suelta.
+    assert "segunda línea del texto del concepto porcentual" not in lineas
+    assert informe.conceptos_eliminados == 6
+
+
+def test_f002_r14_el_porcentual_que_sigue_referenciado_se_conserva(tmp_path):
+    lineas, informe, _ = _convertir(tmp_path, "f002_sin_precio.bc3")
+    assert _registro(lineas, "~C|%RF|")
+    assert informe.conceptos_eliminados == 0
+    motivos = {c.motivo for c in informe.casos}
+    assert "concepto_conservado" in motivos
+
+
+def test_f002_r15_el_registro_m_del_par_convertido_apunta_al_clon(tmp_path):
+    lineas, _, _ = _convertir(tmp_path, "f002_unidad_pct.bc3")
+    assert _registro(lineas, "~M|05.01.01\\") == (
+        "~M|05.01.01\\05.01.01.P1|32\\4\\1\\2\\|66||"
+    )
+    # El padre del ~D venía con la marca de capítulo '#' y el ~M sin ella.
+    assert _registro(lineas, "~M|33.03.01\\") == (
+        "~M|33.03.01\\33.03.01.P1|32\\4\\1\\2\\|66||"
+    )
+
+
+def test_f002_r16_el_descompuesto_con_base_indeterminada_sale_intacto(tmp_path):
+    lineas, informe, _ = _convertir(tmp_path, "f002_sin_precio.bc3")
+    assert _registro(lineas, "~D|09.01.01|") == (
+        "~D|09.01.01|SINPRECIO\\1\\1\\%RF\\1\\0.03\\|"
+    )
+    casos = [c for c in informe.casos if c.motivo == "base_indeterminada"]
+    assert [c.padre for c in casos] == ["09.01.01"]
+    # El otro ~D del mismo fichero sí se convierte.
+    assert _registro(lineas, "~D|09.01.02|") == (
+        "~D|09.01.02|MO0010\\1\\1\\09.01.02.P1\\1\\1\\|"
+    )
+
+
+def test_f002_r17_todo_descompuesto_acaba_en_barra_y_sus_codigos_existen(tmp_path):
+    for fixture in sorted(FIXTURES.glob("f002_*.bc3")):
+        lineas, _, _ = _convertir(tmp_path, fixture.name)
+        codigos = {l.split("|")[1] for l in lineas if l.startswith("~C|")}
+        for linea in [l for l in lineas if l.startswith("~D|")]:
+            assert linea.endswith("\\|"), linea
+            assert not linea.endswith("\\\\|"), linea
+            cuerpo = linea.split("|")[2]
+            partes = cuerpo.split("\\")
+            for i in range(0, len(partes) - 2, 3):
+                assert partes[i] in codigos, f"{fixture.name}: falta ~C de {partes[i]}"
+
+
+def test_f002_r18_las_lineas_no_afectadas_salen_identicas_byte_a_byte(tmp_path):
+    origen = FIXTURES / "f002_negativo.bc3"
+    destino = tmp_path / "salida.bc3"
+    convertir_porcentuales(origen, destino)
+    entrada = origen.read_bytes().decode("latin-1").splitlines(keepends=True)
+    salida = destino.read_bytes().decode("latin-1").splitlines(keepends=True)
+    # Solo cambia el ~D; el resto de líneas viajan tal cual, con sus CRLF.
+    intactas = [l for l in entrada if not l.startswith(("~D|", "~C|%VID|"))]
+    for linea in intactas:
+        assert linea in salida
+    assert all(l.endswith("\r\n") for l in salida)
+    assert destino.read_bytes().decode("latin-1")  # sigue siendo latin-1 legible
+
+
+def test_f002_r23_si_no_existe_la_entrada_lanza_filenotfound_y_no_crea_la_salida(tmp_path):
+    destino = tmp_path / "no_deberia_existir.bc3"
+    with pytest.raises(FileNotFoundError):
+        convertir_porcentuales(FIXTURES / "f002_no_existe.bc3", destino)
+    assert not destino.exists()
