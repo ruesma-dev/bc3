@@ -14,7 +14,7 @@ Sin red, sin BBDD y sin servicios de IA: la pasada solo lee y escribe ficheros.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pytest
@@ -22,19 +22,24 @@ import pytest
 from config.settings import Settings
 from infrastructure.bc3.bc3_modifier import MAX_CODE_LEN, _shorten_code_unique
 from infrastructure.bc3.bc3_porcentajes import (
+    DECIMALES_POR_DEFECTO,
     CasoPorcentual,
     calcular_importes,
     codigo_de_clon,
     convertir_porcentuales,
+    decimales_saneados,
     es_porcentual,
     formatear_precio,
     importe_linea,
     importe_porcentual,
     planificar,
+    triples_de_cuerpo,
 )
 from interface_adapters.cli import porcentuales_cli as cli
 
 FIXTURES = Path(__file__).parent / "fixtures"
+ENTRADAS = Path(__file__).resolve().parents[1] / "input"
+LAGUNA = "lagunamodificado16julio.bc3"
 
 # Precios y tripletas literales de `input/`, tal y como los lee el BC3.
 PRECIOS_43_15 = {
@@ -983,3 +988,95 @@ def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
                        "--informe", str(tmp_path / "i.csv"), "--sin-conversion"])
     assert codigo == 0
     assert salida.read_bytes() == (FIXTURES / "f002_cadena.bc3").read_bytes()
+
+
+# --------------------------------------------------------------------------- #
+# R6 / R6 bis / R7 · Decimales del precio del clon                             #
+# --------------------------------------------------------------------------- #
+def test_f002_r6_los_decimales_por_defecto_son_cuatro():
+    assert Settings().porcentuales_decimales == 4
+    assert DECIMALES_POR_DEFECTO == 4
+
+
+def test_f002_r6_con_dos_decimales_la_cadena_43_15_pierde_el_centimo(tmp_path):
+    """Los números de la ronda 1, que se calcularon con `d = 2`."""
+    salida = tmp_path / "d2.bc3"
+    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida, decimales=2)
+    lineas = leer(salida)
+    precios = [Decimal(_registro(lineas, f"~C|43.15.P{n}|").split("|")[4])
+               for n in (1, 2, 3)]
+    assert precios == [Decimal("12.35"), Decimal("12.35"), Decimal("7.41")]
+    assert Decimal("49.416") + sum(precios) == Decimal("81.526")
+
+
+def test_f002_r6_con_cuatro_decimales_la_cadena_43_15_da_el_literal_de_presto(tmp_path):
+    """81,5364 es lo que calcula Presto sobre el fichero ORIGINAL."""
+    salida = tmp_path / "d4.bc3"
+    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida)  # d = 4
+    lineas = leer(salida)
+    precios = [Decimal(_registro(lineas, f"~C|43.15.P{n}|").split("|")[4])
+               for n in (1, 2, 3)]
+    assert precios == [Decimal("12.354"), Decimal("12.354"), Decimal("7.4124")]
+    assert Decimal("49.416") + sum(precios) == Decimal("81.5364")
+
+
+@pytest.mark.skipif(not (ENTRADAS / LAGUNA).exists(), reason="falta el BC3 de laguna")
+@pytest.mark.parametrize("decimales, esperado", [(2, "172.60"), (4, "172.59")])
+def test_f002_r6_la_partida_real_c020615_pierde_un_centimo_con_dos_decimales(
+    decimales, esperado, tmp_path
+):
+    """El caso que motiva la ronda, medido por el humano en Presto.
+
+    `C020615` son 1.833,59 m² en `lagunamodificado16julio.bc3`: el céntimo que
+    se gana al redondear el clon a 2 decimales se multiplica por la medición y
+    se convierte en 18,34 € de más. Con 4 decimales vuelve a ser 172,59, que es
+    lo que da el fichero original.
+    """
+    salida = tmp_path / f"c020615_{decimales}.bc3"
+    convertir_porcentuales(ENTRADAS / LAGUNA, salida, decimales=decimales)
+    lineas = leer(salida)
+    unidades = {l.split("|")[1]: l.split("|")[2] for l in lineas
+                if l.startswith("~C|")}
+    precios = {l.split("|")[1]: Decimal(l.split("|")[4] or "0") for l in lineas
+               if l.startswith("~C|") and l.split("|")[4]}
+    descompuesto = _registro(lineas, "~D|C020615|")
+    total = sum(
+        (precios[c] * Decimal(f) * Decimal(r)
+         for c, f, r in triples_de_cuerpo(descompuesto.split("|")[2])),
+        Decimal(0),
+    )
+    assert total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == Decimal(esperado)
+    assert all(not u.strip() == "%" for u in unidades.values())
+
+
+def test_f002_r6bis_un_valor_fuera_de_rango_cae_a_cuatro_y_avisa(caplog):
+    with caplog.at_level("WARNING", logger="infrastructure.bc3.bc3_porcentajes"):
+        for malo in (1, 0, -3, 7, 10, "siete", None, 2.5):
+            assert decimales_saneados(malo) == DECIMALES_POR_DEFECTO
+    assert len(caplog.records) == 8
+    assert "PORCENTUALES_DECIMALES" in caplog.records[0].getMessage()
+
+
+def test_f002_r6bis_el_rango_admitido_es_de_dos_a_seis(caplog):
+    with caplog.at_level("WARNING", logger="infrastructure.bc3.bc3_porcentajes"):
+        assert [decimales_saneados(d) for d in (2, 3, 4, 5, 6)] == [2, 3, 4, 5, 6]
+        assert decimales_saneados("6") == 6  # lo que llega de un .env es texto
+    assert caplog.records == []
+
+
+def test_f002_r7_el_precio_no_lleva_ceros_de_relleno(tmp_path):
+    """Con `d = 4`, un 7,41 exacto se escribe `7.41`, no `7.4100`."""
+    salida = tmp_path / "relleno.bc3"
+    convertir_porcentuales(FIXTURES / "f002_negativo.bc3", salida)
+    assert _registro(leer(salida), "~C|05.06.29.P1|").split("|")[4] == "-1.46"
+    assert formatear_precio(Decimal("7.4100"), 4) == "7.41"
+    assert formatear_precio(Decimal("12.3540"), 4) == "12.354"
+    assert formatear_precio(Decimal("1100"), 4) == "1100"
+
+
+def test_f002_r7_el_menos_cero_sigue_escribiendose_cero_con_cualquier_decimal():
+    for decimales in (2, 4, 6):
+        assert formatear_precio(Decimal("-0.00"), decimales) == "0"
+        assert formatear_precio(Decimal("-0.000001"), decimales) in {"0", "-0.000001"}
+        texto = formatear_precio(Decimal("0.00001"), decimales)
+        assert "E" not in texto.upper() and "," not in texto
