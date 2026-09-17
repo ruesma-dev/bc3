@@ -172,3 +172,68 @@ def test_f002_r19_la_pasada_es_idempotente(tmp_path):
         informe = convertir_porcentuales(primera, segunda)
         assert primera.read_bytes() == segunda.read_bytes(), fixture.name
         assert informe.lineas_convertidas == 0 or fixture.name == "f002_sin_precio.bc3"
+
+
+# --------------------------------------------------------------------------- #
+# R19 sobre los BC3 reales de input/ (T9)                                      #
+# --------------------------------------------------------------------------- #
+BC3_DE_INPUT = sorted(ENTRADAS.glob("*.bc3")) if ENTRADAS.is_dir() else []
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("nombre", [p.name for p in BC3_DE_INPUT])
+def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, tmp_path):
+    origen = ENTRADAS / nombre
+    destino = tmp_path / nombre
+    convertir_porcentuales(origen, destino)
+    assert comparar_invariante(origen, destino) == []
+    assert origen.read_bytes() == (ENTRADAS / nombre).read_bytes()  # input/ no se toca
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("nombre", [p.name for p in BC3_DE_INPUT])
+def test_f002_r17_en_input_los_codigos_de_los_d_reescritos_existen(nombre, tmp_path):
+    origen = ENTRADAS / nombre
+    destino = tmp_path / nombre
+    informe = convertir_porcentuales(origen, destino)
+    entrada = set(_lineas(origen))
+    salida = _lineas(destino)
+    codigos = {_campos(l)[1] for l in salida if l.startswith("~C|")}
+    reescritos = [l for l in salida if l.startswith("~D|") and l not in entrada]
+    if not informe.lineas_convertidas:
+        # `presupuesto.bc3` es un banco de precios: tiene conceptos '%' pero
+        # ningún ~D los usa, así que no hay nada que reescribir.
+        assert reescritos == []
+        return
+    assert reescritos, f"{nombre}: la pasada no reescribió ningún ~D"
+    for linea in reescritos:
+        # R17 se le exige a los ~D REESCRITOS: en input/ hay ~D que ya vienen
+        # sin el '\\|' final (los ficheros '_limpio' de pasadas anteriores) y
+        # esta feature no los arregla (R18).
+        assert linea.endswith("\\|"), linea
+        partes = _campos(linea)[2].split("\\")
+        for i in range(0, len(partes) - 2, 3):
+            assert partes[i] in codigos, f"{nombre}: falta ~C de {partes[i]}"
+            assert not partes[i].startswith("%"), f"{nombre}: queda % en {linea}"
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+def test_f002_r9_los_cuatro_casos_reales_de_input_reciben_el_precio_del_padre(tmp_path):
+    """Siroco aporta dos y lagunamodificado16julio los otros dos."""
+    esperado = {
+        "COSTE_250128_Siroco_Rv4mlo.bc3": {"31.04.03.01", "32.03.04.32"},
+        "lagunamodificado16julio.bc3": {"ICV260", "ICV270"},
+    }
+    for nombre, padres in esperado.items():
+        origen = ENTRADAS / nombre
+        if not origen.exists():
+            pytest.skip(f"falta {nombre} en input/")
+        informe = convertir_porcentuales(origen, tmp_path / nombre)
+        casos = {c.padre for c in informe.casos
+                 if c.motivo == "precio_del_padre_aplicado"}
+        assert padres <= casos, f"{nombre}: faltan {padres - casos}"
+        salida = _lineas(tmp_path / nombre)
+        for padre in padres:
+            clon = [l for l in salida if l.startswith(f"~C|{padre}.P1|")]
+            assert clon, f"{nombre}: no hay clon de {padre}"
+            assert Decimal(_campos(clon[0])[4]) == SOLO_PORCENTUALES[padre]
