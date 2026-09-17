@@ -1,0 +1,28 @@
+{
+  "$doc": "EJEMPLO, no activo. Copialo a harness/servicios.json SOLO si este repositorio es un monorepo con varios servicios. Sin harness/servicios.json el arnes es mono-proyecto: no hay nada que configurar y todo funciona como siempre. Campos: 'nombre' (unico), 'ruta' (relativa a la raiz, sin solaparse con la de otro servicio), 'lenguaje' ('python' u 'otro'), 'venv' (opcional: ruta del entorno virtual del servicio; si se declara y no existe, el arnes falla en vez de probar con el interprete equivocado) y 'comando_tests' (opcional: suite de un servicio que no es Python). Ningun campo puede contener el caracter '|'.",
+  "servicios": [
+    {
+      "nombre": "email",
+      "ruta": "services/email",
+      "lenguaje": "python",
+      "venv": "services/email/.venv"
+    },
+    {
+      "nombre": "api",
+      "ruta": "services/api",
+      "lenguaje": "python",
+      "venv": "services/api/.venv"
+    },
+    {
+      "nombre": "web",
+      "ruta": "services/web",
+      "lenguaje": "otro",
+      "comando_tests": "npm test --silent"
+    },
+    {
+      "nombre": "infra",
+      "ruta": "infra",
+      "lenguaje": "otro"
+    }
+  ]
+}

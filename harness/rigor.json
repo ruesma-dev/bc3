@@ -1,0 +1,47 @@
+{
+  "$doc": "Niveles de rigor del arnes. El umbral de cobertura, el timeout de mutacion, los topes de tamano del papeleo y lo que exige cada nivel se editan AQUI, nunca en init.sh ni en el codigo. Si una feature no declara 'rigor' en features.json se le aplica 'nivel_por_defecto'.",
+  "nivel_por_defecto": "estandar",
+  "cobertura": {
+    "umbral_lineas_cambiadas": 80
+  },
+  "mutacion": {
+    "$doc": "timeout_por_mutante_s: SUELO de segundos por mutante, nunca un techo. El timeout EFECTIVO se deriva de la linea base que la campana ya mide dentro de cada worktree con los W workers compitiendo: max(suelo, ceil(peor_linea_base_s * 2)). Un mutante nunca recibe menos que este valor, y la propia linea base corre con suelo*5. El margen y la holgura son constantes del codigo (harness/mutacion.py), no configuracion: son parametros del mecanismo, no de la maquina. Tiene que ser un entero estrictamente positivo; un booleano NO vale (true daria 1 segundo). workers (OPCIONAL, no declarada aqui a proposito): evaluadores concurrentes de 'python -m harness.mutacion'; sin ella el default es min(max(1, (nucleos - 2) // 2), 4), que se adapta a la maquina en vez de viajar cableado de una a otra. El // 2 y el tope 4 vienen de una medicion del 2026-08-21: cada worker arranca una suite COMPLETA (interprete, importaciones, E/S), no un hilo, asi que el recurso escaso es la maquina y no el nucleo. Precedencia: --workers > mutacion.workers > default; lo que se pida a mano no se recorta.",
+    "timeout_por_mutante_s": 120
+  },
+  "tamano": {
+    "$doc": "Topes de LINEAS del papeleo de una feature, medidos por 'python -m harness.tamano --feature F-XXX' y por la seccion 7 quater de init.sh, que mide SOLO la feature en curso. Son topes, no objetivos: lo que no cabe se resume y se enlaza al fichero donde vive el detalle. Cada linea de spec se paga tres veces (la escribe el spec-author, la lee el implementer, la relee el reviewer). tasks.md no tiene tope duro: una tarea por linea. Valores ampliados el 2026-08-20 (120/200/150/100 -> 150/250/220/140): la mediana historica medida en el repositorio donde se calibraron era ~484 lineas en informes de implementer y ~475 en los de review; los topes originales recortaban ~70 % y al estrenarlos el implementer entrego 150/150 y el reviewer 100/100, ambos clavados en el limite. Con los nuevos el recorte sigue siendo ~55 %, asi que el ahorro se mantiene, pero queda aire para lo que nadie debe resumir: las trazas de fase RED y el analisis de supervivientes.",
+    "requirements": 150,
+    "design": 250,
+    "impl": 220,
+    "review": 140
+  },
+  "niveles": {
+    "documental": {
+      "$doc": "Solo documentacion, especificaciones o notas de sesion: ni codigo ni SQL. max_mutantes y semilla son irrelevantes aqui: este nivel no exige mutacion.",
+      "fase_red": false,
+      "cobertura": false,
+      "mutacion": false,
+      "supervivientes_maximos": null,
+      "max_mutantes": null,
+      "semilla": null
+    },
+    "estandar": {
+      "$doc": "Codigo sin riesgo sobre sistemas compartidos. Los supervivientes se documentan y el reviewer juzga. La campana va MUESTREADA a 20 mutantes con semilla fija: acota el coste de analizar supervivientes por escrito y es reproducible (dos reviewers obtienen los mismos 20). Sus numeros NO son comparables con los de campanas completas anteriores.",
+      "fase_red": true,
+      "cobertura": true,
+      "mutacion": true,
+      "supervivientes_maximos": null,
+      "max_mutantes": 20,
+      "semilla": 20260820
+    },
+    "critico": {
+      "$doc": "Infraestructura compartida, produccion, seguridad o dinero. Cada superviviente exige un test nuevo o una justificacion escrita aceptada por el humano. max_mutantes null = SIN TOPE: aqui se mide la campana entera.",
+      "fase_red": true,
+      "cobertura": true,
+      "mutacion": true,
+      "supervivientes_maximos": 0,
+      "max_mutantes": null,
+      "semilla": null
+    }
+  }
+}

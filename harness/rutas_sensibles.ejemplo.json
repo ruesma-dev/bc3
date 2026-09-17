@@ -1,0 +1,36 @@
+{
+  "_como_se_usa": "Copia este fichero a harness/rutas_sensibles.json y adáptalo. MIENTRAS harness/rutas_sensibles.json NO EXISTA, el arnés se comporta exactamente igual que siempre: la sección 7 ter de init.sh no imprime ni una línea. El ejemplo NO se lee nunca.",
+  "_para_que_sirve": "Declarar las zonas del repositorio cuyo cambio NO cubre ningún test unitario (prompts de IA, schemas que rellena un modelo, clientes de un proveedor externo, reglas de negocio deterministas, migraciones, IaC) y qué verificación extra hay que ejecutar cuando el diff de la feature las toca. La puerta NUNCA ejecuta esa verificación: solo comprueba que su informe existe y cumple las líneas exigidas.",
+  "_campos": {
+    "nombre": "identifica la verificación en la salida de init.sh; único",
+    "comando": "el comando exacto que la ejecuta; {feature} se sustituye por la feature en curso",
+    "informe": "ruta del informe que deja ese comando; admite {feature}",
+    "exigencia": "'bloqueo' (KO en init.sh) o 'aviso' (solo lo dice). Una verificación nueva suele arrancar en 'aviso'. Si arranca ahí, escribe en '_exigencia' UNA frase que diga qué tiene que pasar para que suba a 'bloqueo', o el aviso se vuelve permanente por olvido",
+    "_condicion_versionada": "Esa condición tiene que apoyarse en algo VERSIONADO. En albaranes se condicionó a unos libros .xlsx que el .gitignore excluye: existían en la máquina del humano y no en el repositorio, así que la puerta dependía de un artefacto que nadie más podía ver, y la premisa 'todavía no existe' era falsa desde el principio. Si lo que de verdad consume la verificación son unos fixtures versionados, nombra los fixtures. Corregido en el arnés 1.6.0",
+    "exige_lineas": "textos que DEBEN aparecer en el informe para darlo por bueno; deja la lista vacía si basta con que el informe exista",
+    "rutas": "lista de {patron, motivo}. El patrón es un glob relativo a la raíz ('**' incluye subdirectorios). Cada patrón debe casar con al menos un fichero real: un patrón muerto es un aviso falso de protección y el validador lo rechaza"
+  },
+  "verificaciones": [
+    {
+      "nombre": "evals",
+      "comando": "python -m evals.runner --con-llm --feature {feature}",
+      "informe": "progress/evals_{feature}.md",
+      "exigencia": "aviso",
+      "exige_lineas": ["VEREDICTO: VERDE"],
+      "rutas": [
+        { "patron": "config/prompts/**", "motivo": "prompts del modelo: un cambio de redacción no lo caza ningún test" },
+        { "patron": "domain/models/**", "motivo": "schemas que el modelo rellena" }
+      ]
+    },
+    {
+      "nombre": "migraciones",
+      "comando": "python -m scripts.probar_migracion --feature {feature}",
+      "informe": "progress/migracion_{feature}.md",
+      "exigencia": "bloqueo",
+      "exige_lineas": ["RESULTADO: OK"],
+      "rutas": [
+        { "patron": "db/migrations/**", "motivo": "un DDL mal aplicado no se deshace con un rollback de código" }
+      ]
+    }
+  ]
+}

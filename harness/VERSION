@@ -1,0 +1,7 @@
+# harness/VERSION
+# Versión del arnés genérico instalado en este repositorio.
+# Lo escribe `arnes-base`; NO lo edites a mano: si lo tocas, el instalador ya
+# no sabrá qué versión llevas y volverás al problema que este fichero resuelve.
+# Formato: clave=valor, sin espacios. `harness/init.sh` lo lee con `source`.
+ARNES_VERSION=1.7.10
+ARNES_FECHA=2026-09-06

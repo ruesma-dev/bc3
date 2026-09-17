@@ -1,0 +1,64 @@
+{
+  "$schema_comment": "Hooks: la verificación la ejecuta el arnés, no el agente, así que no se puede saltar. Adaptado a Git Bash en Windows.",
+  "$adaptar": "El hook PostToolUse ejecuta pytest. En un proyecto que no sea Python, cambia ese comando por la suite del proyecto (npm test, dotnet test...) o borra el bloque PostToolUse entero: un hook que falla siempre acaba desactivado y con él se pierde también el Stop.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/despierto_hook.sh arrancar",
+            "description": "Impide que Windows suspenda el equipo mientras hay sesión abierta, para no cortar ejecuciones largas.",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/despierto_hook.sh parar",
+            "description": "Devuelve el comportamiento normal de energía al cerrar la sesión.",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m pytest -q --tb=line 2>&1 | tail -5",
+            "description": "Tras editar o escribir ficheros, corre los tests y muestra el resumen."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ARNES_SALTAR_SUITES=1 bash harness/init.sh > /tmp/harness_init.log 2>&1 && echo '[arnes] init.sh OK (portero ligero)' || (echo '[arnes] init.sh FALLO - revisa antes de cerrar:' && tail -20 /tmp/harness_init.log)",
+            "description": "Al terminar cada turno, portero ligero (sin suites: las corre el portero completo en arranque y cierre de feature)."
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bash harness/init.sh)",
+      "Bash(python -m pytest*)",
+      "Bash(python -m compileall*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git branch --show-current)",
+      "Bash(git log*)"
+    ]
+  }
+}

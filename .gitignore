@@ -191,3 +191,15 @@ logs/
 *.bc3
 *.png
 *.xlsx
+
+# >>> ARNES-BASE: reglas anadidas por el instalador del arnes. >>>
+.arnes_cache/
+coverage.json
+*.pdf
+*.docx
+*.pptx
+*.doc
+*.xls
+*.ppt
+.venv/
+# <<< ARNES-BASE: fin del bloque. <<<

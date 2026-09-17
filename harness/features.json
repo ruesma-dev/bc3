@@ -1,0 +1,50 @@
+{
+  "$schema_doc": "Estados: pending -> spec_ready (aprueba humano) -> in_progress -> done. 'blocked' = parada con motivo en progress/current.md. Máximo UNA in_progress (lo valida init.sh). sdd=false salta la spec: 'acceptance' hace de mini-spec y el reviewer valida contra ella.",
+  "$rigor_doc": "El campo 'rigor' de cada feature declara cuanta evidencia se le exige: documental, estandar o critico (ver CHECKPOINTS.md y harness/rigor.json). Si una feature NO lo declara se le aplica el 'nivel_por_defecto' de harness/rigor.json (hoy estandar): omitirlo no libra de las puertas, pero 'critico' se declara, no se hereda.",
+  "rules": {
+    "one_feature_at_a_time": true,
+    "require_init_green_to_close": true,
+    "valid_status": ["pending", "spec_ready", "in_progress", "done", "blocked"]
+  },
+  "features": [
+    {
+      "id": "F-001",
+      "title": "Inventario de conceptos porcentuales de un BC3",
+      "description": "Feature de calentamiento: valida el circuito completo del arnés (rama, acceptance, implementer, reviewer, cierre) con una tarea pequeña y de solo lectura. Añade una función que, dado un .bc3, devuelva la lista de líneas de descompuesto cuyo hijo es un concepto porcentual, con el padre, el código del hijo, el rendimiento y la base acumulada de las líneas que le preceden. No modifica ningún fichero: solo informa. Sirve además de diagnóstico previo a F-002, que es quien transformará esas líneas.",
+      "acceptance": [
+        "Existe una función de lectura que recibe la ruta de un .bc3 y devuelve, por cada línea porcentual, (código del padre, código del hijo, rendimiento, base acumulada previa, importe resultante).",
+        "Un concepto se considera porcentual si su código empieza por '%' o si la unidad de su ~C es '%'.",
+        "Test sin red ni BBDD sobre un .bc3 mínimo en tests/fixtures/, que cubre: un porcentual con base no nula, uno con base cero y un padre sin porcentuales.",
+        "No escribe nada: ni en input/, ni en output/, ni en el fichero de entrada.",
+        "bash harness/init.sh en verde"
+      ],
+      "status": "pending",
+      "sdd": false,
+      "rigor": "estandar",
+      "priority": 1,
+      "branch": "feature/F-001-inventario-porcentuales"
+    },
+    {
+      "id": "F-002",
+      "title": "Convertir los descompuestos porcentuales a UD con cantidad 1 conservando el importe de Presto",
+      "description": "En los presupuestos reales (Siroco, El Escorial) hay descompuestos que no son un material sino un porcentaje: su código empieza por '%', su unidad viene vacía o como '%', el precio de su ~C es el porcentaje en tanto por ciento (-3 = -3 %) y en el ~D del padre el rendimiento es ese mismo porcentaje en tanto por uno (-0.03). Su importe NO es precio x rendimiento: es rendimiento x (suma de los importes de las líneas que le preceden en ese mismo ~D). El ERP de destino no entiende esa semántica, así que hay que dejarlos como una línea normal: unidad UD, cantidad 1 y precio igual al importe que Presto habría calculado. Como el mismo concepto porcentual se reutiliza en decenas de padres con bases distintas (%RF, %VID, %VALCOM...), no se le puede poner un precio único: hay que clonarlo por padre, igual que ya se hace con los clones '.1' de las partidas sin hijos. La transformación es correcta si y solo si el importe de cada partida y el total del presupuesto no se mueven. DUDAS ABIERTAS que la spec debe cerrar con el humano antes de implementar: (1) si la base del porcentaje son solo las líneas anteriores del mismo ~D -verificado contra input/, pero en los casos comprobados las líneas posteriores valían 0, así que no es concluyente- o el descompuesto entero; (2) qué código reciben los clones y cómo se garantiza que siguen cabiendo en 20 caracteres sin colisionar; (3) si el concepto porcentual original se conserva en el fichero como huérfano o se elimina; (4) a cuántos decimales se redondea el precio del clon y si el redondeo se acumula o se corrige en la última línea.",
+      "acceptance": [
+        "Tras la transformación, ningún ~C de un concepto referenciado en un ~D queda con unidad '%', y ninguna tripleta de ~D apunta a un concepto porcentual sin resolver.",
+        "Cada línea porcentual queda como (código del clon, factor 1, rendimiento 1) y el ~C del clon lleva unidad 'UD' y precio igual al importe que Presto calcularía: rendimiento_original x base acumulada previa.",
+        "INVARIANTE: para cada BC3 de input/, el precio de cada partida y el importe total del presupuesto son iguales antes y después de la transformación, con la tolerancia de redondeo que fije la spec. Hay un test que lo comprueba y que falla si se altera el orden de las líneas del ~D.",
+        "Caso porcentaje negativo (descuento, p. ej. %VID -0.02 sobre 73 -> -1.46) cubierto por test con los números reales de input/.",
+        "Caso de dos o más porcentuales en el mismo ~D: el segundo aplica sobre una base que ya incluye el importe del primero.",
+        "Caso porcentual como primera línea del ~D (base 0): importe 0, y el fichero sigue siendo válido.",
+        "Las líneas con rendimiento 0 (alternativas desactivadas) siguen a 0: no se recalculan ni se borran.",
+        "Todo ~D reescrito termina en '\\|' y todos sus códigos existen como ~C en el fichero de salida.",
+        "El BC3 resultante se importa sin errores en Presto (comprobación manual del humano sobre un presupuesto real, anotada en progress/).",
+        "bash harness/init.sh en verde"
+      ],
+      "status": "pending",
+      "sdd": true,
+      "rigor": "critico",
+      "priority": 2,
+      "branch": "feature/F-002-porcentuales-a-ud"
+    }
+  ]
+}
