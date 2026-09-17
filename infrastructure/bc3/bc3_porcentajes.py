@@ -611,9 +611,10 @@ def convertir_porcentuales(src: Path,
 
         if numero in plan.planes:
             descompuesto = plan.planes[numero]
-            emitidos = list(descompuesto.clones)
-            if descompuesto.base is not None:
-                emitidos.insert(0, descompuesto.base)
+            # La base encabeza la familia, igual que en el ~D: en Presto se ve
+            # `<padre>.P0` y debajo sus porcentuales.
+            base = [descompuesto.base] if descompuesto.base is not None else []
+            emitidos = base + list(descompuesto.clones)
             salida.extend(_linea_c_de_clon(c, terminador) for c in emitidos)
             salida.append(_reescribir_d(linea, descompuesto))
             continue

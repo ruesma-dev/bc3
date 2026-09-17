@@ -381,6 +381,11 @@ def test_f002_r9_la_linea_de_base_va_delante_y_es_una_linea_normal(tmp_path):
     assert _registro(lineas, "~D|ICV260|") == (
         "~D|ICV260|ICV260.P0\\1\\1\\ICV260.P1\\1\\1\\ICV260.P2\\1\\1\\|"
     )
+    # La familia sale en orden y delante de su ~D: base, porcentuales, ~D.
+    posicion = {p: i for i, l in enumerate(lineas)
+                for p in ("ICV260.P0", "ICV260.P1") if l.startswith(f"~C|{p}|")}
+    assert posicion["ICV260.P0"] < posicion["ICV260.P1"]
+    assert posicion["ICV260.P1"] < lineas.index(_registro(lineas, "~D|ICV260|"))
     campos = _registro(lineas, "~C|ICV260.P0|").split("|")
     assert campos[2] == "UD"
     assert campos[3] == "Regulador de caudal de aire constante RCR-05, 400x200"
