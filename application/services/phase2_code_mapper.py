@@ -1,5 +1,6 @@
 # application/services/phase2_code_mapper.py
 from __future__ import annotations
+from datetime import datetime
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -607,7 +608,8 @@ def run_phase2(
         refcru_template_xlsx = Path(refcru_template_xlsx)
 
     if refcru_out is None:
-        refcru_out = bc3_out.with_name(bc3_out.stem + "_REFCRU.xlsx")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        refcru_out = bc3_out.parent / f"REFCRU_JUNTA_DE_LA_TROCOLA_{stamp}.xlsx"
     else:
         refcru_out = Path(refcru_out)
 
