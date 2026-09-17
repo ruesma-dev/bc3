@@ -16,7 +16,7 @@ Rama `feature/F-002-porcentuales-a-ud`, un commit por tarea (T1-T14).
 | `application/pipeline/steps.py` | `ConvertirPorcentualesStep`; `TransformBC3Step` usa `ctx.preprocessed_path or ctx.original_path` |
 | `interface_adapters/controllers/etl_controller.py` | `construir_pipeline()`: el step entra entre `ResolveInputStep` y `TransformBC3Step` si la bandera está activa |
 | `config/settings.py` | `porcentuales_a_ud` (`PORCENTUALES_A_UD`, por defecto activa) |
-| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 93 tests |
+| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 98 tests |
 | `tests/fixtures/f002_*.bc3` | 7 fixtures con números reales de `input/` |
 | `docs/ARCHITECTURE.md`, `.gitignore` | el step nuevo en el orden del pipeline; excepción para versionar `tests/fixtures/*.bc3` |
 
@@ -156,12 +156,48 @@ presupuesto y el precio de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`.
 
 | Evidencia | Valor |
 |---|---|
-| Tests ejecutados | PENDIENTE |
-| Cobertura de las líneas cambiadas | PENDIENTE |
-| Mutantes / supervivientes | PENDIENTE |
-| Tiempo de la suite | PENDIENTE |
-| `bash harness/init.sh` | PENDIENTE |
+| Tests ejecutados | **445 pasan, 1 skip** (`python -m pytest tests -q`); **98** son de F-002 |
+| Cobertura de las líneas cambiadas | **98,1 %** (357/364, umbral 80 %, nivel `critico`) |
+| Mutantes / supervivientes | **156 generados, 156 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (`python -m harness.mutacion --feature F-002`, 352,4 s, SHA `49722f4`) → `progress/mutacion_F-002.md` |
+| Tiempo de ejecución de la suite | **42,7 s** (los 98 de F-002, 4,7 s) |
+| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución tras cerrar T14) |
 
-### Supervivientes de la campaña
+### Supervivientes: los tres asaltos de la campaña
 
-PENDIENTE
+La campaña se lanzó tres veces; el informe de disco es el de la tercera, que
+es la que vale (su SHA es el de HEAD).
+
+| Campaña | Mutantes | Supervivientes | Qué eran |
+|---|---|---|---|
+| 1ª (`465165e`) | 174 | 62 | huecos reales de test + guardas de código inalcanzable |
+| 2ª (`897d3e7`) | 156 | 3 | los tres `mkdir(parents=True)` |
+| **3ª (`49722f4`)** | **156** | **0** | — |
+
+Cómo se cerraron, por familias (ninguno quedó justificado «a mano»):
+
+1. **Contrato del helper compartido** (`_shorten_code_unique`, 3 mutantes):
+   nada comprobaba que el defecto sea `forzar_unicidad=False` ni que el helper
+   NO registre en `used` lo que devuelve intacto. Dos tests nuevos.
+2. **Números ilegibles** (`importe_linea`, `importe_porcentual`,
+   `_base_es_indeterminada`, 6 mutantes): faltaba el caso «uno de los dos
+   números no se lee». Tests nuevos, incluido el `~D` que por eso cae en R16.
+3. **`~C` y `~D` truncados** (12 mutantes): cada `if len(campos) > N` necesita
+   un registro con exactamente N campos. Un BC3 de test con `~C` de 2, 3, 4, 5
+   y 6 campos y `~D` sin barra y sin pipe final los cazó todos.
+4. **Filas del informe** (6 mutantes): se comprobaba el motivo pero no el
+   padre, el código, el rendimiento ni el importe de cada caso. Ahora sí.
+5. **Redondeo acumulado** (R6, 1 mutante): con la base sin redondear el
+   segundo clon del caso de prueba sale 56,17 en vez de 56,18. Test con esos
+   números.
+6. **Inmutabilidad del plan** (3 mutantes `frozen=True`): test que comprueba
+   que `CasoPorcentual`, `LineaClon` y `PlanDescompuesto` no se dejan tocar.
+7. **`~T` multilínea y líneas sueltas** (2 mutantes): test con un `~T` de dos
+   líneas que sobrevive y otro que se borra entero, y una línea antes del
+   primer registro.
+8. **Carpetas de salida** (4 mutantes `parents=True`): los tests escribían a
+   un solo nivel por crear, donde `parents=False` también vale. Ahora escriben
+   dos niveles por debajo de `tmp_path`.
+9. **Código muerto** (≈14 mutantes equivalentes): `campos[1]` existe siempre
+   si la línea empieza por `~C|`/`~D|`/`~T|`/`~M|`, y los valores por defecto
+   de `InformePorcentuales.anota` y de `construir_pipeline` no los usaba
+   nadie. Se quitaron: un mutante equivalente es código que sobra.
