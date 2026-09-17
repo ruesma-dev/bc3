@@ -37,7 +37,13 @@ from infrastructure.bc3.bc3_modifier import (
 logger = logging.getLogger(__name__)
 
 # --- constantes del dominio ------------------------------------------------ #
-CENTIMO = Decimal("0.01")
+# Decimales del precio del clon (R6). 4 por defecto: con 2 el desvío medido
+# sobre la salida real llega a 165 EUR en Siroco y 143 EUR en laguna, siempre
+# al alza —ROUND_HALF_UP tiene sesgo—, y con 6 ya es cero. El mínimo es 2
+# porque es lo que traen los `~C` originales (tabla en `design.md`).
+DECIMALES_POR_DEFECTO = 4
+DECIMALES_MINIMOS = 2
+DECIMALES_MAXIMOS = 6
 UNIDAD_CLON = "UD"
 TIPO_CLON = "3"
 MARCA_PORCENTUAL = "%"
@@ -77,6 +83,7 @@ class InformePorcentuales:
     descompuestos: int = 0
     lineas_convertidas: int = 0
     conceptos_eliminados: int = 0
+    decimales: int = DECIMALES_POR_DEFECTO
     casos: list[CasoPorcentual] = field(default_factory=list)
 
     def anota(self, padre: str, codigo: str, motivo: str,
@@ -116,21 +123,53 @@ def a_decimal(texto: str | Decimal | None) -> Decimal | None:
         return None
 
 
-def redondear_centimos(valor: Decimal) -> Decimal:
-    """Redondeo a 2 decimales con ROUND_HALF_UP (R6)."""
-    return valor.quantize(CENTIMO, rounding=ROUND_HALF_UP)
+def decimales_saneados(valor: object) -> int:
+    """Decimales admitidos para el precio del clon, o el defecto con aviso.
 
-
-def formatear_precio(valor: Decimal) -> str:
-    """Precio tal y como se escribe en un `~C`: 2 decimales, punto, sin `E`.
-
-    El `-0` se escribe como `0` (R7): un precio negativo de cero es ruido que
-    algunos ERP leen como texto no numérico.
+    R6 bis: fuera de 2..6, o si no es un entero, se usa 4 y se avisa por log.
+    Un `.env` trae texto, así que `"6"` vale; `2.5` no, porque un número de
+    decimales fraccionario no significa nada.
     """
-    redondeado = redondear_centimos(valor)
+    try:
+        decimales = int(valor)  # type: ignore[arg-type]
+        if decimales != valor and str(valor) != str(decimales):
+            raise ValueError(valor)
+    except (TypeError, ValueError):
+        logger.warning(
+            "PORCENTUALES_DECIMALES=%r no es un entero: se usan %d decimales",
+            valor, DECIMALES_POR_DEFECTO,
+        )
+        return DECIMALES_POR_DEFECTO
+    if not DECIMALES_MINIMOS <= decimales <= DECIMALES_MAXIMOS:
+        logger.warning(
+            "PORCENTUALES_DECIMALES=%s fuera del rango %d..%d: se usan %d",
+            decimales, DECIMALES_MINIMOS, DECIMALES_MAXIMOS,
+            DECIMALES_POR_DEFECTO,
+        )
+        return DECIMALES_POR_DEFECTO
+    return decimales
+
+
+def redondear(valor: Decimal, decimales: int) -> Decimal:
+    """Redondeo a `decimales` posiciones con ROUND_HALF_UP (R6)."""
+    return valor.quantize(Decimal(1).scaleb(-decimales), rounding=ROUND_HALF_UP)
+
+
+def formatear_precio(valor: Decimal, decimales: int) -> str:
+    """Precio tal y como se escribe en un `~C` (R7).
+
+    Notación decimal con punto, sin exponentes y sin ceros de relleno a la
+    derecha: un 7,41 exacto sale `7.41` aunque se redondee a 4 decimales. El
+    `-0` se escribe `0`: un precio negativo de cero es ruido que algunos ERP
+    leen como texto no numérico.
+    """
+    redondeado = redondear(valor, decimales)
     if redondeado == 0:
         return "0"
-    return f"{redondeado:f}"
+    texto = f"{redondeado:f}"
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    return texto
 
 
 # --------------------------------------------------------------------------- #
@@ -185,16 +224,16 @@ def calcular_importes(triples: Sequence[Tripleta],
                       precios: Mapping[str, Decimal | None],
                       es_pct: Callable[[str], bool],
                       *,
-                      redondear: bool = False,
+                      redondear_a: int | None = None,
                       base_inicial: Decimal | None = None) -> list[Decimal]:
     """Importe de cada tripleta, recorridas EN EL ORDEN DEL FICHERO (D3).
 
     Es la única implementación del cálculo: la usan la pasada y los tests.
 
-    - `redondear=True` fija cada importe porcentual a 2 decimales y acumula en
+    - `redondear_a=d` fija cada importe porcentual a `d` decimales y acumula en
       la base el valor YA redondeado (R6), que es el que se podrá releer en el
       fichero de salida. Es el modo con el que se calculan los precios de clon.
-    - `redondear=False` deja el encadenado exacto: es como se mide la ENTRADA
+    - `redondear_a=None` deja el encadenado exacto: es como se mide la ENTRADA
       al comprobar el invariante de R19.
     - `base_inicial` arranca el acumulado de D3 en ese valor en vez de en 0:
       es la base reconstruida de un `~D` cuyas líneas son todas porcentuales
@@ -205,8 +244,8 @@ def calcular_importes(triples: Sequence[Tripleta],
     for codigo, factor, rendimiento in triples:
         if es_pct(codigo):
             importe = importe_porcentual(factor, rendimiento, base)
-            if redondear:
-                importe = redondear_centimos(importe)
+            if redondear_a is not None:
+                importe = redondear(importe, redondear_a)
         else:
             importe = importe_linea(precios.get(codigo), factor, rendimiento)
         importes.append(importe)
@@ -357,8 +396,11 @@ def _base_es_indeterminada(triples: Sequence[Tripleta],
     return False
 
 
-def planificar(src: Path, encoding: str = "latin-1") -> Plan:
+def planificar(src: Path,
+               encoding: str = "latin-1",
+               decimales: int = DECIMALES_POR_DEFECTO) -> Plan:
     """PASADA 1: lee el fichero entero y decide qué se convierte y con qué código."""
+    decimales = decimales_saneados(decimales)
     lineas = _leer_lineas(Path(src), encoding)
 
     precios: dict[str, Decimal | None] = {}
@@ -389,6 +431,7 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
 
     plan = Plan()
     informe = plan.informe
+    informe.decimales = decimales
 
     for numero, linea in enumerate(lineas):
         if not linea.startswith("~D|"):
@@ -427,10 +470,11 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
                               a_decimal(primer_pct[2]), 0)
                 logger.info("~D %s sin convertir: base no despejable", padre)
                 continue
-            base_inicial = redondear_centimos(precio_padre / producto)
+            base_inicial = redondear(precio_padre / producto, decimales)
 
         importes = calcular_importes(triples, precios, es_pct,
-                                     redondear=True, base_inicial=base_inicial)
+                                     redondear_a=decimales,
+                                     base_inicial=base_inicial)
 
         # La línea de base se reserva ANTES que las porcentuales para que se
         # quede con el `.P0` natural (R5) y encabece la familia en Presto.
@@ -464,7 +508,7 @@ def planificar(src: Path, encoding: str = "latin-1") -> Plan:
             # R9 bis: el residuo de redondeo se absorbe aquí, nunca retocando
             # una línea porcentual, así que la suma del ~D es exactamente P.
             resto = precio_padre - sum((c.precio for c in clones), Decimal(0))
-            linea_base = replace(linea_base, precio=redondear_centimos(resto))
+            linea_base = replace(linea_base, precio=redondear(resto, decimales))
             informe.anota(padre, linea_base.codigo, MOTIVO_BASE_RECONSTRUIDA,
                           producto, linea_base.precio)
             logger.info(
@@ -524,11 +568,12 @@ def _terminador_de(linea: str) -> str:
     return linea[len(linea.rstrip("\r\n")):]
 
 
-def _linea_c_de_clon(clon: LineaClon | LineaBase, terminador: str) -> str:
+def _linea_c_de_clon(clon: LineaClon | LineaBase, terminador: str,
+                     decimales: int) -> str:
     """`~C` de un clon o de una línea de base: unidad UD, tipo 3 (R4)."""
     return (
         f"~C|{clon.codigo}|{UNIDAD_CLON}|{clon.resumen}|"
-        f"{formatear_precio(clon.precio)}|{clon.fecha}|{TIPO_CLON}|{terminador}"
+        f"{formatear_precio(clon.precio, decimales)}|{clon.fecha}|{TIPO_CLON}|{terminador}"
     )
 
 
@@ -571,7 +616,8 @@ def convertir_porcentuales(src: Path,
                            dst: Path,
                            *,
                            encoding: str = "latin-1",
-                           activo: bool = True) -> InformePorcentuales:
+                           activo: bool = True,
+                           decimales: int = DECIMALES_POR_DEFECTO) -> InformePorcentuales:
     """PASADA 2: escribe en `dst` el BC3 con los porcentuales ya convertidos.
 
     Con `activo=False` copia el fichero sin tocar ni una línea (R21). Si la
@@ -587,7 +633,7 @@ def convertir_porcentuales(src: Path,
         logger.info("porcentuales_a_ud desactivada: %s copiado sin cambios", src.name)
         return InformePorcentuales()
 
-    plan = planificar(src, encoding)
+    plan = planificar(src, encoding, decimales)
     lineas = _leer_lineas(src, encoding)
     terminador = _terminador(lineas)
 
@@ -615,7 +661,8 @@ def convertir_porcentuales(src: Path,
             # `<padre>.P0` y debajo sus porcentuales.
             base = [descompuesto.base] if descompuesto.base is not None else []
             emitidos = base + list(descompuesto.clones)
-            salida.extend(_linea_c_de_clon(c, terminador) for c in emitidos)
+            salida.extend(_linea_c_de_clon(c, terminador, plan.informe.decimales)
+                          for c in emitidos)
             salida.append(_reescribir_d(linea, descompuesto))
             continue
 
@@ -628,8 +675,10 @@ def convertir_porcentuales(src: Path,
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_bytes("".join(salida).encode(encoding))
     logger.info(
-        "%s → %s: %d ~D con porcentual, %d líneas convertidas, %d conceptos eliminados",
+        "%s → %s: %d ~D con porcentual, %d líneas convertidas, %d conceptos "
+        "eliminados, %d decimales",
         src.name, dst.name, plan.informe.descompuestos,
         plan.informe.lineas_convertidas, plan.informe.conceptos_eliminados,
+        plan.informe.decimales,
     )
     return plan.informe

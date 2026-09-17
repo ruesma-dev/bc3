@@ -33,3 +33,14 @@ la implementación que las pone en verde.
 - [x] T23: Regenerar la campaña de mutación sobre el código nuevo (rigor `critico`: cero supervivientes sin justificación aceptada)  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
 - [ ] T24: Verificación MANUAL (humano) de la regla nueva: `python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio.bc3" "output/laguna_sin_pct.bc3"`, importar en Presto y confirmar `ICV260` = 291,50 (no 336,39) e `ICV270` = 369,50  |  Verificación: MANUAL (humano), resultado anotado en `progress/current.md`
 - [x] T25: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
+
+## Decimales del precio del clon (2026-09-18) · R6, R6 bis
+
+- [x] T26: Test en RED de R6: con `PORCENTUALES_DECIMALES=2` la salida de `43.15` es la vieja (12,35 · 12,35 · 7,41, suma 81,526) y con el defecto 4 es la nueva (12,3540 · 12,3540 · 7,4124, suma 81,5364)  |  Verificación: `pytest tests/test_f002_porcentuales.py -k r6_` en RED, con la traza en `progress/impl_F-002.md`
+- [x] T27: Test en RED de R6 bis (valores fuera de 2..6 o no numéricos caen a 4 con aviso en log) y de R7 (punto decimal, sin exponentes, sin ceros de relleno, `0` en vez de `-0`)  |  Verificación: `pytest tests/test_f002_porcentuales.py -k "r6bis or r7_"` en RED
+- [x] T28: Añadir `porcentuales_decimales` a `Settings` (`_env_int("PORCENTUALES_DECIMALES", "4")`, saneado a 2..6) y propagarlo por `ConvertirPorcentualesStep` y el CLI  |  Verificación: T26 y T27 en verde
+- [x] T29: Parametrizar el redondeo en `infrastructure/bc3/bc3_porcentajes.py` (`quantize(Decimal(1).scaleb(-d), ROUND_HALF_UP)` en el precio del clon, en la base de R9 y en el residuo de R9 bis) y el formateo del número de R7  |  Verificación: `pytest tests/ -q` en verde
+- [x] T30: Test de R19 y R19 bis **con `d = 2` y con `d = 4`** (`Settings` clonado con `replace`), sobre fixtures y sobre cada `.bc3` de `input/`: la tolerancia se calcula con `d` y la suma de los `~D` de R9 sigue dando `P` exacto  |  Verificación: `pytest tests/test_f002_invariante.py -q`
+- [ ] T31: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
+- [ ] T32: Verificación MANUAL (humano): importar en Presto la salida con 4 decimales y anotar **cuántos decimales acepta**; si acepta 6, subir `PORCENTUALES_DECIMALES=6` y repetir  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
+- [ ] T33: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0

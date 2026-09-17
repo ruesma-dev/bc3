@@ -43,6 +43,7 @@ def escribir_informe(informe: InformePorcentuales, destino: Path) -> Path:
         escritor.writerow(("descompuestos_con_porcentual", informe.descompuestos))
         escritor.writerow(("lineas_convertidas", informe.lineas_convertidas))
         escritor.writerow(("conceptos_eliminados", informe.conceptos_eliminados))
+        escritor.writerow(("decimales_del_precio", informe.decimales))
         escritor.writerow(())
         escritor.writerow(CABECERA_CASOS)
         for caso in informe.casos:
@@ -68,6 +69,9 @@ def _argumentos(argv: Sequence[str] | None) -> argparse.Namespace:
                             help=f"CSV del informe (por defecto {INFORME_POR_DEFECTO})")
     analizador.add_argument("--sin-conversion", action="store_true",
                             help="copia el fichero sin tocarlo (bandera apagada)")
+    analizador.add_argument("--decimales", type=str, default=None,
+                            help="decimales del precio de los clones, 2..6 "
+                                 "(por defecto, PORCENTUALES_DECIMALES del .env)")
     return analizador.parse_args(argv)
 
 
@@ -78,9 +82,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _argumentos(argv)
 
     activo = ajustes.porcentuales_a_ud and not args.sin_conversion
+    decimales = (args.decimales if args.decimales is not None
+                 else ajustes.porcentuales_decimales)
     try:
         informe = convertir_porcentuales(
-            args.entrada, args.salida, encoding=ajustes.encoding, activo=activo
+            args.entrada, args.salida, encoding=ajustes.encoding, activo=activo,
+            decimales=decimales,
         )
     except FileNotFoundError:
         logger.error("No existe el fichero de entrada: %s", args.entrada)
@@ -89,10 +96,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ruta_informe = escribir_informe(informe, args.informe)
     logger.info(
         "%s → %s | %d ~D con porcentual, %d líneas convertidas, "
-        "%d conceptos eliminados, %d casos excepcionales",
+        "%d conceptos eliminados, %d casos excepcionales, %d decimales",
         args.entrada, args.salida, informe.descompuestos,
         informe.lineas_convertidas, informe.conceptos_eliminados,
-        len(informe.casos),
+        len(informe.casos), informe.decimales,
     )
     logger.info("Informe → %s", ruta_informe)
     return 0

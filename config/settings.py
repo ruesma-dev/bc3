@@ -44,6 +44,10 @@ class Settings:
     # F-002: pasada previa que convierte los descompuestos porcentuales a UD
     # con cantidad 1. Apagada, el BC3 pasa al resto del ETL sin tocar (R21).
     porcentuales_a_ud: bool = _env_bool("PORCENTUALES_A_UD", "true")
+    # Decimales del precio de los clones (R6). El rango admitido (2..6) y la
+    # caída al 4 por defecto los aplica `bc3_porcentajes.decimales_saneados`,
+    # que es quien redondea: aquí solo se lee lo que ponga el `.env`.
+    porcentuales_decimales: int = _env_int("PORCENTUALES_DECIMALES", "4")
 
     # ---------------- Salida ----------------
     csv_sep: str = os.getenv("CSV_SEPARATOR", ";")

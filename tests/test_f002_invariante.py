@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from infrastructure.bc3.bc3_porcentajes import (
+    DECIMALES_POR_DEFECTO,
     a_decimal,
     calcular_importes,
     convertir_porcentuales,
@@ -86,7 +87,18 @@ def _importe_total(triples, precios, es_pct) -> Decimal:
     return sum(calcular_importes(triples, precios, es_pct), Decimal(0))
 
 
-def comparar_invariante(origen: Path, destino: Path) -> list[str]:
+def tolerancia_de(porcentuales: int, decimales: int) -> Decimal:
+    """R19: `0,01 + nº de porcentuales × 10^(−d) / 2`.
+
+    Con `d = 2` da la tolerancia original (0,005 por línea) y con `d = 4`
+    aprieta cien veces más, que es de lo que sirve subir la precisión.
+    """
+    medio_paso = Decimal(1).scaleb(-decimales) / 2
+    return Decimal("0.01") + medio_paso * porcentuales
+
+
+def comparar_invariante(origen: Path, destino: Path,
+                        decimales: int = DECIMALES_POR_DEFECTO) -> list[str]:
     """Devuelve la lista de `~D` que se salen de la tolerancia de R19."""
     entrada, salida = _lineas(origen), _lineas(destino)
     unidades_e, precios_e = _unidades_y_precios(entrada)
@@ -111,7 +123,7 @@ def comparar_invariante(origen: Path, destino: Path) -> list[str]:
             continue  # R9: cambia a propósito, va listado en el informe
         antes = _importe_total(triples_e, precios_e, pct_entrada)
         despues = _importe_total(triples_s, precios_s, pct_salida)
-        tolerancia = Decimal("0.01") + Decimal("0.005") * len(porcentuales)
+        tolerancia = tolerancia_de(len(porcentuales), decimales)
         if abs(antes - despues) > tolerancia:
             desviados.append(f"{padre_e}: {antes} -> {despues} (tol {tolerancia})")
     return desviados
@@ -120,12 +132,15 @@ def comparar_invariante(origen: Path, destino: Path) -> list[str]:
 # --------------------------------------------------------------------------- #
 # R19 sobre las fixtures                                                       #
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("decimales", [2, 4])
 @pytest.mark.parametrize("fixture", sorted(p.name for p in FIXTURES.glob("f002_*.bc3")))
-def test_f002_r19_el_importe_de_cada_descompuesto_se_conserva(fixture, tmp_path):
+def test_f002_r19_el_importe_de_cada_descompuesto_se_conserva(
+    fixture, decimales, tmp_path
+):
     origen = FIXTURES / fixture
-    destino = tmp_path / fixture
-    convertir_porcentuales(origen, destino)
-    assert comparar_invariante(origen, destino) == []
+    destino = tmp_path / f"{decimales}_{fixture}"
+    convertir_porcentuales(origen, destino, decimales=decimales)
+    assert comparar_invariante(origen, destino, decimales) == []
 
 
 def test_f002_r19_los_descompuestos_solo_porcentuales_se_listan_en_el_informe(tmp_path):
@@ -135,8 +150,9 @@ def test_f002_r19_los_descompuestos_solo_porcentuales_se_listan_en_el_informe(tm
     )
     casos = {c.padre: c for c in informe.casos if c.motivo == "base_reconstruida"}
     assert set(casos) == set(SOLO_PORCENTUALES)
-    bases = {"31.04.03.01": Decimal("1073.17"), "32.03.04.32": Decimal("955.26"),
-             "ICV260": Decimal("225.98"), "ICV270": Decimal("286.45")}
+    bases = {"31.04.03.01": Decimal("1073.1707"),
+             "32.03.04.32": Decimal("955.2564"),
+             "ICV260": Decimal("225.9792"), "ICV270": Decimal("286.4471")}
     for padre, base in bases.items():
         assert Decimal(str(casos[padre].importe)) == base
 
@@ -189,13 +205,14 @@ BC3_DE_INPUT = sorted(ENTRADAS.glob("*.bc3")) if ENTRADAS.is_dir() else []
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("decimales", [2, 4])
 @pytest.mark.parametrize("nombre", [p.name for p in BC3_DE_INPUT])
-def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, tmp_path):
+def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, decimales, tmp_path):
     origen = ENTRADAS / nombre
-    destino = tmp_path / nombre
+    destino = tmp_path / f"{decimales}_{nombre}"
     antes = origen.read_bytes()
-    convertir_porcentuales(origen, destino)
-    assert comparar_invariante(origen, destino) == []
+    convertir_porcentuales(origen, destino, decimales=decimales)
+    assert comparar_invariante(origen, destino, decimales) == []
     # `input/` es de solo lectura: la pasada no puede haber escrito en él.
     assert origen.read_bytes() == antes
 
@@ -250,9 +267,10 @@ def test_f002_r9_los_cuatro_casos_reales_de_input_reconstruyen_su_base(tmp_path)
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("decimales", [2, 4])
 @pytest.mark.parametrize("nombre", sorted(FICHEROS_SOLO_PCT))
 def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
-    nombre, tmp_path
+    nombre, decimales, tmp_path
 ):
     """R19 bis · lo único que caza el defecto de la R9 anterior.
 
@@ -265,8 +283,8 @@ def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
     origen = ENTRADAS / nombre
     if not origen.exists():
         pytest.skip(f"falta {nombre} en input/")
-    destino = tmp_path / nombre
-    convertir_porcentuales(origen, destino)
+    destino = tmp_path / f"{decimales}_{nombre}"
+    convertir_porcentuales(origen, destino, decimales=decimales)
 
     salida = _lineas(destino)
     unidades, precios = _unidades_y_precios(salida)

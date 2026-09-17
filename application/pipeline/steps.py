@@ -46,13 +46,16 @@ class ConvertirPorcentualesStep(Step):
         out_dir.mkdir(parents=True, exist_ok=True)
         destino = out_dir / FICHERO_SIN_PORCENTUALES
         informe = convertir_porcentuales(
-            ctx.original_path, destino, encoding=ctx.settings.encoding
+            ctx.original_path, destino,
+            encoding=ctx.settings.encoding,
+            decimales=ctx.settings.porcentuales_decimales,
         )
         ctx.preprocessed_path = destino
         logger.info(
-            "Porcentuales a UD → %s (%d ~D, %d líneas, %d conceptos eliminados)",
+            "Porcentuales a UD → %s (%d ~D, %d líneas, %d conceptos eliminados,"
+            " %d decimales)",
             destino, informe.descompuestos, informe.lineas_convertidas,
-            informe.conceptos_eliminados,
+            informe.conceptos_eliminados, informe.decimales,
         )
 
 
