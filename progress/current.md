@@ -5,24 +5,28 @@
 conservando el importe de Presto** · rama `feature/F-002-porcentuales-a-ud` ·
 rigor `critico` · estado `in_progress`.
 
-**Ronda 4 en curso: se revierte el criterio de la ronda 3.** El diagnóstico de
-entonces era erróneo y el dato nuevo lo tumba: contrastando contra el precio
-que el `~C` de cada partida declara —que lo escribió Presto al exportar—,
-**2 decimales acierta 260/262 (99,2 %) en Siroco y 402/402 (100 %) en laguna**,
-mientras 4 baja a 94,3 % y 80,1 %. Presto redondea a céntimos CADA línea del
-descompuesto, así que más precisión se aleja de su resultado. Y `C020615`, el
-caso que motivó la ronda 3, declara **172,6** en su propio `~C`: el 172,59 de
-4 decimales salía de un cálculo exacto, no de Presto.
+**Ronda 5 cerrada (T35-T43, T45): la limpieza del texto.** Elena importó
+nuestra salida en Sigrid y cuatro partidas entraron **sin descompuesto**:
+`VALV1`, `VALV4`, `VALV5` y `VALV6` («Válvula de bola, ½"», `1¼"`, `1½"`,
+`2"`). `VALV2` («3/4"»), del mismo capítulo, entró bien: las distingue el
+no-ASCII del resumen. La pasada limpia ahora el resumen de cada `~C`, el texto
+de cada `~T` y el de los clones con el `clean_text` de siempre, bajo la bandera
+`PORCENTUALES_LIMPIAR_TEXTO` (por defecto true) y `--sin-limpiar-texto`.
+Códigos, precios, factores, rendimientos y unidades no se tocan, y con la
+bandera apagada la salida sigue siendo byte a byte la de antes.
 
-El defecto vuelve a **2** y queda sujeto por **R6 ter**, el test que compara
-contra ese número ajeno con umbral del 98 %. Toda la infraestructura de la
-ronda 3 se queda: `PORCENTUALES_DECIMALES`, el rango 2..6, `--decimales` y el
-formateo sin ceros de relleno.
+**Se ha tocado código compartido y conviene saberlo**: `clean_text`
+(`utils/text_sanitize.py`) prometía ASCII y dejaba pasar `Ø`, `ø`, `ß` y la mu
+de `µ`, porque NFKD no descompone esas letras y todas son `isalnum()`. Se ha
+corregido **en ese único sitio**, no duplicando la limpieza, así que **también
+cambia la salida de `convert_to_material`** —que escribe para el mismo
+Sigrid—: 984 conceptos con descompuesto propio de `input/` salen ya limpios.
 
-**NO se marca `done`**: faltan las TRES verificaciones MANUALES del humano
-(T15 Siroco, T24 laguna, T32 decimales en Presto).
+**NO se marca `done`**: faltan las CUATRO verificaciones MANUALES del humano
+(T15 Siroco, T24 laguna, T32 decimales en Presto y T44 la importación en
+Sigrid).
 
-## Las tres rondas
+## Las cinco rondas
 
 1. **Ronda 1** — la pasada completa. Aprobada.
 2. **Ronda 2** — R9 inflaba las partidas con dos porcentuales (`ICV260`
@@ -40,6 +44,8 @@ formateo sin ceros de relleno.
 
 4. **Ronda 4** — el contraste anterior se hacía contra un simulador de cálculo
    exacto, no contra Presto. Contra el `~C` declarado, el ganador es 2.
+5. **Ronda 5** — el texto: Sigrid no importa el descompuesto de un concepto
+   cuyo resumen lleva no-ASCII (R24-R26).
 
 ## Pendiente del humano
 
@@ -51,12 +57,16 @@ formateo sin ceros de relleno.
 3. **T32 · decimales** — ya no hace falta para decidir el valor (lo decide
    R6 ter con datos), pero sigue siendo útil saber **cuántos decimales acepta
    Presto**: si alguna vez interesa subirlo, es una línea en el `.env`.
-4. **Confirmar en el Presto de Elena cuánto dice C18.** Si 2.826.961,28, el
+4. **T44 · Sigrid** — importar `output/laguna_sin_pct.bc3` **en Sigrid** y
+   confirmar que `VALV1`, `VALV4`, `VALV5` y `VALV6` entran ya **con su
+   descompuesto**. Es la verificación de la ronda 5 y la única que dice si el
+   problema de Elena está resuelto de verdad.
+5. **Confirmar en el Presto de Elena cuánto dice C18.** Si 2.826.961,28, el
    convertido es el fiel y la diferencia de 381,64 € es fidelidad recuperada,
    no error.
-5. **R13 sobre `input/presupuesto.bc3`**: borra 42 `~C` porcentuales sin
+6. **R13 sobre `input/presupuesto.bc3`**: borra 42 `~C` porcentuales sin
    convertir ninguna línea (banco de precios). Sin decidir.
-6. **El suelo de 0,01 de R19** (lo levanta el reviewer): el invariante general
+7. **El suelo de 0,01 de R19** (lo levanta el reviewer): el invariante general
    no ve un error de ~0,009 € por `~D`, del mismo orden que el céntimo que
    costó la ronda 3. Hoy eso lo cubren R19 bis y los tests con números de
    Presto. Si se quiere que R19 también lo cubra, hay que hacer proporcional
@@ -73,8 +83,12 @@ formateo sin ceros de relleno.
    original, una captura del ERP— y no solo contra otro resultado de la misma
    función. Los dos defectos de esta feature los encontró el humano
    importando en Presto, y los dos eran errores de regla, no de código.
+4. **Una utilidad compartida que promete algo en su docstring necesita un test
+   que lo fije.** `clean_text` prometía ASCII desde hace años y no lo cumplía;
+   nadie lo vio porque nadie lo había escrito como test.
 
 ## Aviso de tamaño
 
-`requirements.md` 150/150 y `design.md` 250/250: en el tope exacto. La
-próxima corrección obliga a resumir y enlazar.
+`design.md` 250/250 e `impl_F-002.md` 220/220: en el tope exacto
+(`requirements.md`, 138/150, tiene aire). La próxima corrección obliga a
+resumir y enlazar.

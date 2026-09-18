@@ -56,6 +56,6 @@ la implementación que las pone en verde.
 - [x] T40: Implementar la limpieza en `infrastructure/bc3/bc3_porcentajes.py` usando `utils.text_sanitize.clean_text` —sin escribir otra limpieza— sobre el resumen del `~C`, el texto del `~T` y el resumen de clones y líneas de base  |  Verificación: T36-T38 en verde y `pytest tests/ -q` sin regresiones
 - [x] T41: Test sobre cada `.bc3` de `input/`: tras la pasada con la bandera encendida, **ningún `~C` con descompuesto propio conserva caracteres no ASCII en su resumen** (R25)  |  Verificación: `pytest tests/test_f002_invariante.py -k acentos`
 - [x] T42: Test de R26: R6 ter, R19 y R19 bis pasan con la bandera encendida **y** apagada  |  Verificación: `pytest tests/test_f002_invariante.py -q` parametrizado por la bandera
-- [ ] T43: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
+- [x] T43: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
 - [ ] T44: Verificación MANUAL (humano): pasar el CLI sobre el presupuesto de Elena Díaz, importarlo en Sigrid y confirmar que `VALV1`, `VALV4`, `VALV5` y `VALV6` entran ya con su descompuesto  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
-- [ ] T45: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
+- [x] T45: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
