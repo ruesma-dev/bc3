@@ -204,13 +204,18 @@ BC3_DE_INPUT = sorted(ENTRADAS.glob("*.bc3")) if ENTRADAS.is_dir() else []
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("limpiar", [True, False])
 @pytest.mark.parametrize("decimales", [2, 4])
 @pytest.mark.parametrize("nombre", [p.name for p in BC3_DE_INPUT])
-def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, decimales, tmp_path):
+def test_f002_r19_invariante_sobre_los_bc3_de_input(nombre, decimales, limpiar,
+                                                   tmp_path):
+    """R26: limpiar el texto no puede mover ni un céntimo, así que el
+    invariante se exige con la bandera de R24 en los dos estados."""
     origen = ENTRADAS / nombre
-    destino = tmp_path / f"{decimales}_{nombre}"
+    destino = tmp_path / f"{decimales}_{limpiar}_{nombre}"
     antes = origen.read_bytes()
-    convertir_porcentuales(origen, destino, decimales=decimales)
+    convertir_porcentuales(origen, destino, decimales=decimales,
+                           limpiar_texto=limpiar)
     assert comparar_invariante(origen, destino, decimales) == []
     # `input/` es de solo lectura: la pasada no puede haber escrito en él.
     assert origen.read_bytes() == antes
@@ -266,10 +271,11 @@ def test_f002_r9_los_cuatro_casos_reales_de_input_reconstruyen_su_base(tmp_path)
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("limpiar", [True, False])
 @pytest.mark.parametrize("decimales", [2, 4])
 @pytest.mark.parametrize("nombre", sorted(FICHEROS_SOLO_PCT))
 def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
-    nombre, decimales, tmp_path
+    nombre, decimales, limpiar, tmp_path
 ):
     """R19 bis · lo único que caza el defecto de la R9 anterior.
 
@@ -282,8 +288,9 @@ def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
     origen = ENTRADAS / nombre
     if not origen.exists():
         pytest.skip(f"falta {nombre} en input/")
-    destino = tmp_path / f"{decimales}_{nombre}"
-    convertir_porcentuales(origen, destino, decimales=decimales)
+    destino = tmp_path / f"{decimales}_{limpiar}_{nombre}"
+    convertir_porcentuales(origen, destino, decimales=decimales,
+                           limpiar_texto=limpiar)
 
     salida = _lineas(destino)
     unidades, precios = _unidades_y_precios(salida)
@@ -299,6 +306,64 @@ def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
         if abs(calculado - esperado) > Decimal("0.01"):
             desviados.append(f"{padre}: {calculado} != {esperado}")
     assert desviados == []
+
+
+# --------------------------------------------------------------------------- #
+# R25 · Tras la pasada no queda un no-ASCII en el resumen de un concepto con   #
+#       descompuesto propio: son los que Sigrid deja sin importar             #
+# --------------------------------------------------------------------------- #
+# Los cuatro que marcó Elena en `lagunamodificado16julio.bc3`. En su mismo
+# capítulo, `VALV2` («3/4"») entró sin problema: lo que los distingue es el
+# no-ASCII del resumen, no el concepto.
+VALV_QUE_SIGRID_NO_IMPORTO = {
+    "VALV1": 'Valvula de bola, 12"',
+    "VALV4": 'Valvula de bola, 114"',
+    "VALV5": 'Valvula de bola, 112"',
+    "VALV6": 'Valvula de bola, 2"',
+}
+
+
+def _resumenes(lineas: list[str]) -> dict[str, str]:
+    return {_campos(l)[1].strip(): _campos(l)[3]
+            for l in lineas if l.startswith("~C|") and len(_campos(l)) > 3}
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("nombre", [p.name for p in BC3_DE_INPUT])
+def test_f002_r25_en_input_nadie_con_descompuesto_conserva_acentos(nombre, tmp_path):
+    """El barrido de R25 sobre los BC3 reales, fichero a fichero."""
+    origen = ENTRADAS / nombre
+    antes = origen.read_bytes()
+    destino = tmp_path / nombre
+    convertir_porcentuales(origen, destino)
+    salida = _lineas(destino)
+
+    con_descompuesto = {_campos(l)[1].strip() for l in salida if l.startswith("~D|")}
+    assert con_descompuesto, f"{nombre}: ningún ~D que juzgar"
+    resumenes = _resumenes(salida)
+    sucios = [(c, r) for c, r in resumenes.items()
+              if c in con_descompuesto and not r.isascii()]
+    assert sucios == [], f"{nombre}: {sucios[:5]}"
+
+    if nombre == "lagunamodificado16julio.bc3":
+        for codigo, esperado in VALV_QUE_SIGRID_NO_IMPORTO.items():
+            assert codigo in con_descompuesto, f"{codigo} se quedó sin ~D"
+            assert resumenes[codigo] == esperado
+    # `input/` es de solo lectura.
+    assert origen.read_bytes() == antes
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+def test_f002_r25_sin_limpiar_los_acentos_siguen_ahi(tmp_path):
+    """El barrido anterior no es una tautología: con la bandera apagada falla."""
+    origen = ENTRADAS / "lagunamodificado16julio.bc3"
+    if not origen.exists():
+        pytest.skip("falta lagunamodificado16julio.bc3 en input/")
+    destino = tmp_path / "sucio.bc3"
+    convertir_porcentuales(origen, destino, limpiar_texto=False)
+    resumenes = _resumenes(_lineas(destino))
+    assert resumenes["VALV1"] == 'Válvula de bola, ½"'
+    assert [c for c in VALV_QUE_SIGRID_NO_IMPORTO if not resumenes[c].isascii()]
 
 
 # --------------------------------------------------------------------------- #
@@ -344,8 +409,10 @@ def aciertos_contra_el_c_declarado(origen: Path, destino: Path):
 
 
 @pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("limpiar", [True, False])
 @pytest.mark.parametrize("nombre", sorted(FICHEROS_SOLO_PCT))
-def test_f002_r6_el_importe_reproduce_el_precio_que_declara_el_c(nombre, tmp_path):
+def test_f002_r6_el_importe_reproduce_el_precio_que_declara_el_c(nombre, limpiar,
+                                                                 tmp_path):
     """El número de fuera: lo que calculó Presto al exportar el presupuesto.
 
     Todo lo demás que comprueba esta suite compara resultados nuestros contra
@@ -357,8 +424,9 @@ def test_f002_r6_el_importe_reproduce_el_precio_que_declara_el_c(nombre, tmp_pat
     origen = ENTRADAS / nombre
     if not origen.exists():
         pytest.skip(f"falta {nombre} en input/")
-    destino = tmp_path / nombre
-    convertir_porcentuales(origen, destino)  # con los decimales por defecto
+    destino = tmp_path / f"{limpiar}_{nombre}"
+    # Con los decimales por defecto y R24 en los dos estados (R26).
+    convertir_porcentuales(origen, destino, limpiar_texto=limpiar)
 
     aciertos, comparados, fallos = aciertos_contra_el_c_declarado(origen, destino)
     assert comparados > 200, f"{nombre}: solo {comparados} partidas comparadas"
