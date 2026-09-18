@@ -397,7 +397,7 @@ def test_f002_r9_la_linea_de_base_va_delante_y_es_una_linea_normal(tmp_path):
     campos = _registro(lineas, "~C|ICV260.P0|").split("|")
     assert campos[2] == "UD"
     assert campos[3] == "Regulador de caudal de aire constante RCR-05, 400x200"
-    assert campos[4] == "225.9792"
+    assert campos[4] == "225.98"
     assert campos[5] == "150626"
     assert campos[6] == "3"
     # Y ya no queda ningún concepto % en el descompuesto.
@@ -446,8 +446,8 @@ def test_f002_r9bis_el_residuo_se_absorbe_en_la_linea_de_base(tmp_path):
     salida = tmp_path / "salida.bc3"
     convertir_porcentuales(entrada, salida)
     lineas = leer(salida)
-    assert _registro(lineas, "~C|09.21.01.P1|").split("|")[4] == "1.3044"
-    assert _registro(lineas, "~C|09.21.01.P0|").split("|")[4] == "8.6956"
+    assert _registro(lineas, "~C|09.21.01.P1|").split("|")[4] == "1.31"
+    assert _registro(lineas, "~C|09.21.01.P0|").split("|")[4] == "8.69"
     assert _suma_de_la_familia(lineas, "09.21.01") == Decimal("10.00")
 
 
@@ -650,7 +650,7 @@ def test_f002_r9_el_log_dice_de_que_precio_sale_la_base(tmp_path, caplog):
     with caplog.at_level("INFO", logger="infrastructure.bc3.bc3_porcentajes"):
         convertir_porcentuales(FIXTURES / "f002_solo_pct.bc3", tmp_path / "s.bc3")
     mensajes = [r.getMessage() for r in caplog.records]
-    assert any("ICV260" in m and "225.9792" in m and "291.5" in m
+    assert any("ICV260" in m and "225.98" in m and "291.5" in m
                for m in mensajes), mensajes
 
 
@@ -844,7 +844,7 @@ def test_f002_r6_la_base_acumula_el_importe_YA_redondeado(tmp_path):
          "~D|09.15.01|BASE\\1\\1\\%UNO\\1\\0.12345\\%DOS\\1\\0.5\\|\r\n").encode("latin-1")
     )
     salida = tmp_path / "salida.bc3"
-    convertir_porcentuales(entrada, salida, decimales=2)
+    convertir_porcentuales(entrada, salida)
     lineas = leer(salida)
     assert _registro(lineas, "~C|09.15.01.P1|").split("|")[4] == "12.35"
     assert _registro(lineas, "~C|09.15.01.P2|").split("|")[4] == "56.18"
@@ -866,12 +866,12 @@ def test_f002_r9_un_rendimiento_cero_no_estorba_a_la_base(tmp_path):
     salida = tmp_path / "salida.bc3"
     informe = convertir_porcentuales(entrada, salida)
     lineas = leer(salida)
-    assert _registro(lineas, "~C|09.14.01.P0|").split("|")[4] == "45.4545"
+    assert _registro(lineas, "~C|09.14.01.P0|").split("|")[4] == "45.45"
     assert _registro(lineas, "~C|09.14.01.P1|").split("|")[4] == "0"
-    assert _registro(lineas, "~C|09.14.01.P2|").split("|")[4] == "4.5455"
+    assert _registro(lineas, "~C|09.14.01.P2|").split("|")[4] == "4.55"
     casos = [c for c in informe.casos if c.motivo == "base_reconstruida"]
     assert [(c.padre, c.codigo, c.importe) for c in casos] == [
-        ("09.14.01", "09.14.01.P0", 45.4545)
+        ("09.14.01", "09.14.01.P0", 45.45)
     ]
 
 
@@ -887,8 +887,8 @@ def test_f002_r9_el_precio_del_padre_se_busca_con_la_marca_de_capitulo_y_sin_ell
     salida = tmp_path / "salida.bc3"
     informe = convertir_porcentuales(entrada, salida)
     lineas = leer(salida)
-    assert _registro(lineas, "~C|33.04.01.P0|").split("|")[4] == "97.0874"
-    assert _registro(lineas, "~C|33.04.01.P1|").split("|")[4] == "2.9126"
+    assert _registro(lineas, "~C|33.04.01.P0|").split("|")[4] == "97.09"
+    assert _registro(lineas, "~C|33.04.01.P1|").split("|")[4] == "2.91"
     assert [c.padre for c in informe.casos
             if c.motivo == "base_reconstruida"] == ["33.04.01#"]
 
@@ -998,16 +998,16 @@ def test_f002_r6_el_cli_acepta_los_decimales_por_linea_de_ordenes(tmp_path):
     salida = tmp_path / "salida.bc3"
     informe = tmp_path / "informe.csv"
     codigo = cli.main([str(FIXTURES / "f002_cadena.bc3"), str(salida),
-                       "--informe", str(informe), "--decimales", "2"])
+                       "--informe", str(informe), "--decimales", "4"])
     assert codigo == 0
     lineas = leer(salida)
-    assert _registro(lineas, "~C|43.15.P1|").split("|")[4] == "12.35"
-    assert "decimales_del_precio;2" in informe.read_bytes().decode("utf-8-sig")
+    assert _registro(lineas, "~C|43.15.P1|").split("|")[4] == "12.354"
+    assert "decimales_del_precio;4" in informe.read_bytes().decode("utf-8-sig")
 
     por_defecto = tmp_path / "defecto.bc3"
     cli.main([str(FIXTURES / "f002_cadena.bc3"), str(por_defecto),
               "--informe", str(tmp_path / "i2.csv")])
-    assert _registro(leer(por_defecto), "~C|43.15.P1|").split("|")[4] == "12.354"
+    assert _registro(leer(por_defecto), "~C|43.15.P1|").split("|")[4] == "12.35"
 
 
 def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
@@ -1021,15 +1021,16 @@ def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
 # --------------------------------------------------------------------------- #
 # R6 / R6 bis / R7 · Decimales del precio del clon                             #
 # --------------------------------------------------------------------------- #
-def test_f002_r6_los_decimales_por_defecto_son_cuatro():
-    assert Settings().porcentuales_decimales == 4
-    assert DECIMALES_POR_DEFECTO == 4
+def test_f002_r6_los_decimales_por_defecto_son_dos():
+    """2 es el redondeo con el que la salida reproduce lo que calcula Presto."""
+    assert Settings().porcentuales_decimales == 2
+    assert DECIMALES_POR_DEFECTO == 2
 
 
-def test_f002_r6_con_dos_decimales_la_cadena_43_15_pierde_el_centimo(tmp_path):
-    """Los números de la ronda 1, que se calcularon con `d = 2`."""
+def test_f002_r6_con_dos_decimales_la_cadena_43_15_da_81_526(tmp_path):
+    """El redondeo por defecto: cada línea a céntimos, como hace Presto."""
     salida = tmp_path / "d2.bc3"
-    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida, decimales=2)
+    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida)
     lineas = leer(salida)
     precios = [Decimal(_registro(lineas, f"~C|43.15.P{n}|").split("|")[4])
                for n in (1, 2, 3)]
@@ -1037,10 +1038,13 @@ def test_f002_r6_con_dos_decimales_la_cadena_43_15_pierde_el_centimo(tmp_path):
     assert Decimal("49.416") + sum(precios) == Decimal("81.526")
 
 
-def test_f002_r6_con_cuatro_decimales_la_cadena_43_15_da_el_literal_de_presto(tmp_path):
-    """81,5364 es lo que calcula Presto sobre el fichero ORIGINAL."""
+def test_f002_r6_con_cuatro_decimales_la_cadena_43_15_da_el_encadenado_exacto(tmp_path):
+    """Con `d = 4` sale el encadenado sin redondear, 81,5364.
+
+    Más preciso, pero NO es lo que hace Presto: por eso el defecto es 2.
+    """
     salida = tmp_path / "d4.bc3"
-    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida)  # d = 4
+    convertir_porcentuales(FIXTURES / "f002_cadena.bc3", salida, decimales=4)
     lineas = leer(salida)
     precios = [Decimal(_registro(lineas, f"~C|43.15.P{n}|").split("|")[4])
                for n in (1, 2, 3)]
@@ -1050,15 +1054,15 @@ def test_f002_r6_con_cuatro_decimales_la_cadena_43_15_da_el_literal_de_presto(tm
 
 @pytest.mark.skipif(not (ENTRADAS / LAGUNA).exists(), reason="falta el BC3 de laguna")
 @pytest.mark.parametrize("decimales, esperado", [(2, "172.60"), (4, "172.59")])
-def test_f002_r6_la_partida_real_c020615_pierde_un_centimo_con_dos_decimales(
+def test_f002_r6_la_partida_real_c020615_reproduce_su_c_con_dos_decimales(
     decimales, esperado, tmp_path
 ):
-    """El caso que motiva la ronda, medido por el humano en Presto.
+    """`~C|C020615|M2|FACHADA VENTILADA COMPOSITE|172.6|`: 172,60 lo escribió
+    Presto al exportar `lagunamodificado16julio.bc3`.
 
-    `C020615` son 1.833,59 m² en `lagunamodificado16julio.bc3`: el céntimo que
-    se gana al redondear el clon a 2 decimales se multiplica por la medición y
-    se convierte en 18,34 € de más. Con 4 decimales vuelve a ser 172,59, que es
-    lo que da el fichero original.
+    Con 2 decimales la salida da ese mismo 172,60; con 4 da 172,59, que es el
+    cálculo exacto pero no el de Presto. Son 1.833,59 m², así que el céntimo
+    son 18,34 € en esa partida: por eso el defecto es 2 y no 4.
     """
     salida = tmp_path / f"c020615_{decimales}.bc3"
     convertir_porcentuales(ENTRADAS / LAGUNA, salida, decimales=decimales)
@@ -1075,6 +1079,9 @@ def test_f002_r6_la_partida_real_c020615_pierde_un_centimo_con_dos_decimales(
     )
     assert total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == Decimal(esperado)
     assert all(u.strip() != "%" for u in unidades.values())
+    if decimales == 2:
+        declarado = precios["C020615"]
+        assert Decimal(esperado) == declarado, "el ~C original declara 172,6"
 
 
 def test_f002_r6bis_un_valor_fuera_de_rango_cae_a_cuatro_y_avisa(caplog):

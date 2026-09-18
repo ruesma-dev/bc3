@@ -37,11 +37,13 @@ from infrastructure.bc3.bc3_modifier import (
 logger = logging.getLogger(__name__)
 
 # --- constantes del dominio ------------------------------------------------ #
-# Decimales del precio del clon (R6). 4 por defecto: con 2 el desvío medido
-# sobre la salida real llega a 165 EUR en Siroco y 143 EUR en laguna, siempre
-# al alza —ROUND_HALF_UP tiene sesgo—, y con 6 ya es cero. El mínimo es 2
-# porque es lo que traen los `~C` originales (tabla en `design.md`).
-DECIMALES_POR_DEFECTO = 4
+# Decimales del precio del clon (R6). **2 por defecto**, porque el objetivo de
+# la feature es reproducir lo que calcula Presto, no minimizar el error de
+# redondeo: contrastado contra el precio que el `~C` de cada partida declara
+# —que lo escribió Presto al exportar—, 2 decimales acierta el 99,2 % de Siroco
+# y el 100 % de laguna, y 4 decimales baja al 94,3 % y al 80,1 %. Presto redondea
+# a céntimos cada línea del descompuesto, así que más precisión se aleja.
+DECIMALES_POR_DEFECTO = 2
 DECIMALES_MINIMOS = 2
 DECIMALES_MAXIMOS = 6
 UNIDAD_CLON = "UD"

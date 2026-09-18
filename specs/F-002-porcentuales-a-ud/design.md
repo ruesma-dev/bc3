@@ -90,26 +90,25 @@ siendo `d = settings.porcentuales_decimales`. La base acumulada suma el importe
 **ya redondeado**, así que es la que se puede releer en la salida. El número se
 escribe con `f"{valor:f}"` + `normalize()`, sin exponentes ni relleno (R7).
 
-### Decimales del precio del clon (R6, R6 bis)
+### Decimales del precio del clon (R6, R6 bis, R6 ter)
 
-`d` es configurable —**4 por defecto**— porque los `~C` originales no pasan de
-2 decimales y aún no sabemos cuántos admite Presto al importar; el humano lo
-comprueba en la verificación manual y subir a 6 debe ser cambiar un valor en
-`.env`, no otra ronda de spec. Desvío del precio de cada partida ponderado por
-su medición `~M`, medido sobre la salida real (neto / absoluto):
+`d` es configurable —**2 por defecto**—, y el criterio no es minimizar el error
+de redondeo sino **reproducir lo que calcula Presto**, que es lo que pide la
+feature. Se contrasta contra el precio que el `~C` de cada partida declara,
+escrito por Presto al exportar; fuera, las de precio a mano (R9 y `07.02.01a`):
 
 | `d` | Siroco | laguna |
 |---|---|---|
-| 2 | +165,08 € / 224,65 € | +143,36 € / 230,74 € |
-| 3 | +4,42 € / 15,43 € | +1,95 € / 22,14 € |
-| **4** | **+1,50 € / 1,63 €** | **+3,39 € / 4,57 €** |
-| 6 | +0,00 € / 0,00 € | −0,02 € / 0,03 € |
+| **2** | **260/262 (99,2 %)** | **402/402 (100 %)** |
+| 3 | 237/262 (90,5 %) | 321/402 (79,9 %) |
+| 4 | 247/262 (94,3 %) | 322/402 (80,1 %) |
+| 6 | 247/262 (94,3 %) | 320/402 (79,6 %) |
 
-El neto no se compensa porque `ROUND_HALF_UP` empuja siempre al alza en el
-empate: el error tiene **sesgo**, no es ruido. Esta tabla es el dato que hay que
-releer si alguien se plantea volver a 2. Ejemplo con `d = 2` (`43.15`):
-`41,18 × 1,2 = 49,416` → `12,35` → `12,35` (sobre 61,766) → `7,41` (sobre
-74,116); suma 81,526 frente a 81,5364. Con `d = 4` sale 81,5364 clavado.
+Presto redondea a céntimos **cada línea**, así que más precisión se aleja de su
+resultado en vez de acercarse. Con `d = 2` (`43.15`): `41,18 × 1,2 = 49,416` →
+`12,35` → `12,35` (sobre 61,766) → `7,41`; suma 81,526. El `~C` de `C020615`
+declara 172,60, que es lo que da `d = 2`: el 172,59 de `d = 4` es el cálculo
+exacto, no el de Presto. Subir `d` sigue siendo tocar `PORCENTUALES_DECIMALES`.
 
 ### Base reconstruida del `~D` solo-porcentual (R9, R9 bis, R9 ter)
 

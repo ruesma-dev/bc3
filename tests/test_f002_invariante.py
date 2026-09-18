@@ -17,7 +17,7 @@ modo lectura y la salida se escribe siempre en el `tmp_path` del test.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pytest
@@ -150,9 +150,8 @@ def test_f002_r19_los_descompuestos_solo_porcentuales_se_listan_en_el_informe(tm
     )
     casos = {c.padre: c for c in informe.casos if c.motivo == "base_reconstruida"}
     assert set(casos) == set(SOLO_PORCENTUALES)
-    bases = {"31.04.03.01": Decimal("1073.1707"),
-             "32.03.04.32": Decimal("955.2564"),
-             "ICV260": Decimal("225.9792"), "ICV270": Decimal("286.4471")}
+    bases = {"31.04.03.01": Decimal("1073.17"), "32.03.04.32": Decimal("955.26"),
+             "ICV260": Decimal("225.98"), "ICV270": Decimal("286.45")}
     for padre, base in bases.items():
         assert Decimal(str(casos[padre].importe)) == base
 
@@ -300,3 +299,71 @@ def test_f002_r19bis_los_solo_porcentuales_de_input_suman_el_precio_del_padre(
         if abs(calculado - esperado) > Decimal("0.01"):
             desviados.append(f"{padre}: {calculado} != {esperado}")
     assert desviados == []
+
+
+# --------------------------------------------------------------------------- #
+# R6 · El importe reproduce el precio que Presto declaró en el `~C`            #
+# --------------------------------------------------------------------------- #
+# Partidas cuyo `~C` NO cuadra con su propio descompuesto en ningún redondeo,
+# así que no sirven para juzgar el nuestro:
+#   - los cuatro de base 0, que van por R9 y cambian a propósito;
+#   - `07.02.01a`, precio puesto a mano (ver `explore_porcentuales.md` §2b).
+PRECIOS_A_MANO = {"ICV260", "ICV270", "31.04.03.01", "32.03.04.32", "07.02.01a"}
+ACIERTOS_MINIMOS = Decimal("0.98")
+
+
+def aciertos_contra_el_c_declarado(origen: Path, destino: Path):
+    """(aciertos, comparados, fallos) frente al precio del `~C` del padre."""
+    entrada, salida = _lineas(origen), _lineas(destino)
+    unidades_e, precios_e = _unidades_y_precios(entrada)
+    unidades_s, precios_s = _unidades_y_precios(salida)
+
+    def pct_entrada(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades_e.get(codigo, ""))
+
+    def pct_salida(codigo: str) -> bool:
+        return es_porcentual(codigo, unidades_s.get(codigo, ""))
+
+    aciertos, comparados, fallos = 0, 0, []
+    for (padre, triples_e), (_, triples_s) in zip(_descompuestos(entrada),
+                                                  _descompuestos(salida)):
+        if not any(pct_entrada(t[0]) for t in triples_e):
+            continue
+        if padre in PRECIOS_A_MANO or padre.rstrip("#") in PRECIOS_A_MANO:
+            continue
+        declarado = precios_e.get(padre) or precios_e.get(padre.rstrip("#"))
+        if declarado is None or declarado == 0:
+            continue
+        comparados += 1
+        total = _importe_total(triples_s, precios_s, pct_salida)
+        if total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == declarado:
+            aciertos += 1
+        else:
+            fallos.append(f"{padre}: {total} != {declarado}")
+    return aciertos, comparados, fallos
+
+
+@pytest.mark.skipif(not BC3_DE_INPUT, reason="no hay BC3 en input/")
+@pytest.mark.parametrize("nombre", sorted(FICHEROS_SOLO_PCT))
+def test_f002_r6_el_importe_reproduce_el_precio_que_declara_el_c(nombre, tmp_path):
+    """El número de fuera: lo que calculó Presto al exportar el presupuesto.
+
+    Todo lo demás que comprueba esta suite compara resultados nuestros contra
+    resultados nuestros. Esto no: el precio del `~C` de cada partida lo escribió
+    Presto, así que si alguien toca el redondeo del clon, aquí se ve. Medido
+    sobre `input/`: con 2 decimales se reproduce el 99,2 % de Siroco y el 100 %
+    de laguna; con 4, el 94,3 % y el 80,1 %.
+    """
+    origen = ENTRADAS / nombre
+    if not origen.exists():
+        pytest.skip(f"falta {nombre} en input/")
+    destino = tmp_path / nombre
+    convertir_porcentuales(origen, destino)  # con los decimales por defecto
+
+    aciertos, comparados, fallos = aciertos_contra_el_c_declarado(origen, destino)
+    assert comparados > 200, f"{nombre}: solo {comparados} partidas comparadas"
+    proporcion = Decimal(aciertos) / Decimal(comparados)
+    assert proporcion >= ACIERTOS_MINIMOS, (
+        f"{nombre}: {aciertos}/{comparados} ({proporcion:.1%}); "
+        f"primeros fallos: {fallos[:5]}"
+    )
