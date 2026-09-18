@@ -179,11 +179,11 @@ en `progress/current.md`.
 
 | Evidencia | Valor |
 |---|---|
-| Tests ejecutados | **488 pasan, 1 skip** (`python -m pytest tests -q`); **141** son de F-002 |
+| Tests ejecutados | **490 pasan, 1 skip** (`python -m pytest tests -q`); **143** son de F-002 |
 | Cobertura de las líneas cambiadas | **98,8 %** (408/413, umbral 80 %, nivel `critico`) |
-| Mutantes / supervivientes | **177 generados, 177 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (369,3 s, SHA `7cf5d9a` = HEAD, alcance 885 líneas) → `progress/mutacion_F-002.md` |
-| Tiempo de ejecución de la suite | **48,3 s** en la última pasada de `init.sh` (los 141 de F-002, ~6 s) |
-| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución: tras cerrar T31) |
+| Mutantes / supervivientes | **177 generados, 177 muertos, 0 supervivientes**, 0 timeouts, campaña completa sin muestreo (346,8 s, SHA `380ee71` = HEAD, alcance 888 líneas) → `progress/mutacion_F-002.md` |
+| Tiempo de ejecución de la suite | **46,5 s** en la última pasada de `init.sh` (los 143 de F-002, ~2 s) |
+| `bash harness/init.sh` | **ENTORNO LISTO**, exit code 0 (última ejecución: tras cerrar T34) |
 
 ### Supervivientes: cómo se llegó al cero
 
@@ -203,9 +203,9 @@ ninguno quedó justificado «a mano». Por familias:
 5. **Orden de la familia de clones** (1): `insert(0, base)` frente a
    `insert(1, base)` no lo distinguía nadie; ahora la lista se construye como
    `base + clones` y el test fija que `.P0` va antes que `.P1`.
-6. **Ronda 3** (2): `Decimal(1).scaleb(-d)` daba igual con `Decimal(2)` porque
-   `quantize` solo mira el exponente —se escribe `Decimal(f"1e-{d}")` y el
-   literal desaparece—, y el `--decimales` del CLI no lo probaba nadie.
+6. **Rondas 3 y 4** (2): `Decimal(1).scaleb(-d)` daba igual con `Decimal(2)`
+   porque `quantize` solo mira el exponente —se escribe `Decimal(f"1e-{d}")` y
+   el literal desaparece—, y el `--decimales` del CLI no lo probaba nadie.
 7. **Código muerto** (≈17 equivalentes): `campos[1]` existe siempre tras
    `~C|`/`~D|`/`~T|`/`~M|`; los valores por defecto de
    `InformePorcentuales.anota` y de `construir_pipeline` no los usaba nadie;
