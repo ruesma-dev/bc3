@@ -2,71 +2,75 @@
 # F-002 · Informe de implementación
 
 Feature `critico`, SDD. Spec: `specs/F-002-porcentuales-a-ud/`. Rama
-`feature/F-002-porcentuales-a-ud`, un commit por tarea. Tres rondas:
+`feature/F-002-porcentuales-a-ud`, un commit por tarea. Cuatro rondas:
 
 | Ronda | Tareas | Qué trajo |
 |---|---|---|
 | 1 | T1-T14, T16 | la pasada completa; aprobada por el reviewer |
 | 2 | T17-T23, T25 | R9 reescrita: base reconstruida (`ICV260` salía 336,39) |
-| 3 | T26-T31, T33 | decimales del precio del clon configurables, 4 por defecto |
+| 3 | T26-T31, T33 | decimales del precio del clon configurables |
+| 4 | T34 | el defecto vuelve a **2**, sujeto por R6 ter |
 
 **T15, T24 y T32 son MANUALES del humano y siguen PENDIENTES** (abajo).
 
-## Ronda 3 · los decimales del precio del clon
+## Rondas 3 y 4 · los decimales del precio del clon
 
-**El defecto.** El humano importó en Presto la salida y el original y los
-comparó: el convertido salía **381,64 € por encima** (19.542.981,39 frente a
-19.542.599,75). El líder lo desglosó por capítulos: en 8 de los 9 que difieren
-el convertido da justo el precio que el `~C` del capítulo ya declaraba, o sea
-que ahí la conversión recupera fidelidad. El que sí era nuestro es C06, y su
-causa es el redondeo: **`C020615` pasaba de 172,59 a 172,60**, un céntimo que,
-multiplicado por su medición de 1.833,59 m², son **18,34 €**.
+**Ronda 3.** El humano comparó en Presto la salida y el original: el convertido
+salía 381,64 € por encima. El desglose por capítulos mostró que en 8 de los 9
+que difieren el convertido da justo lo que el `~C` del capítulo ya declaraba
+—fidelidad recuperada, no error—, y quedaba C06: `C020615` cambiaba un céntimo
+que, por su medición de 1.833,59 m², eran 18,34 €. Se hizo configurable el
+redondeo (`Settings.porcentuales_decimales`, `PORCENTUALES_DECIMALES`, rango
+2..6 por R6 bis, `--decimales` en el CLI) y se puso el defecto en 4.
 
-**La regla nueva** (R6): los decimales del precio del clon los fija
-`Settings.porcentuales_decimales` (`PORCENTUALES_DECIMALES` del `.env`),
-**4 por defecto**, y el mismo `d` se usa en el precio del clon, en la base
-reconstruida de R9 y en el residuo de R9 bis. R6 bis acota el rango a **2..6**
-—2 es lo que traen los `~C` originales, 6 donde el desvío ya es cero— y
-cualquier otra cosa cae a 4 con aviso por log. R7 escribe el número sin ceros
-de relleno: un 7,41 exacto sale `7.41`, no `7.4100`.
+**Ronda 4: ese defecto era el equivocado y se revierte a 2.** El contraste de
+la ronda 3 se hacía contra un simulador de cálculo exacto. Contra el número que
+de verdad viene de fuera —el precio que el `~C` de cada partida declara,
+escrito por Presto al exportar— gana el 2. Medido aquí: `~D` con porcentual
+cuyo importe sobre la SALIDA coincide con ese precio, fuera las cinco partidas
+de precio puesto a mano.
 
-`C020615` de `lagunamodificado16julio.bc3`, que es el caso del que salió todo,
-está fijado como test parametrizado:
-
-| `d` | precio que da la salida | |
+| `d` | Siroco | laguna |
 |---|---|---|
-| 2 | **172,60** | un céntimo de más → 18,34 € en esa partida |
-| 4 | **172,59** | el del fichero original |
+| **2** | **260/262 (99,2 %)** | **402/402 (100 %)** |
+| 3 | 237/262 (90,5 %) | 321/402 (79,9 %) |
+| 4 | 247/262 (94,3 %) | 322/402 (80,1 %) |
+| 6 | 247/262 (94,3 %) | 320/402 (79,6 %) |
 
-Desvío del **precio unitario** sobre `input/`, medido aquí `~D` a `~D` (sin
-ponderar por la medición `~M`, que es lo que hace la tabla de `design.md`):
+Presto redondea a céntimos **cada línea** del descompuesto: más precisión se
+aleja de su resultado, no se acerca. Y `C020615`, el caso que motivó la ronda
+3, declara **172,6** en su propio `~C` —`~C|C020615|M2|FACHADA VENTILADA
+COMPOSITE|172.6|`—, que es justo lo que da `d = 2`; el 172,59 de `d = 4` es el
+cálculo exacto, no el de Presto. No había error que corregir ahí.
 
-| `d` | Siroco (neto / absoluto) | laguna (neto / absoluto) |
-|---|---|---|
-| 2 | +0,0296 € / 0,7242 € | +0,1708 € / 1,2565 € |
-| **4** | **+0,0043 € / 0,0050 €** | **+0,0022 € / 0,0096 €** |
-| 6 | 0 / 0 | −0,0000 € / 0,0001 € |
+De la ronda 3 **se queda todo lo demás**: el parámetro, el rango 2..6 con caída
+al defecto y aviso (R6 bis), `--decimales`, el formateo sin ceros de relleno
+(R7) y el uso del mismo `d` en la base de R9 y en el residuo de R9 bis. Subir
+el valor sigue siendo una línea del `.env`.
 
-El neto no se compensa porque `ROUND_HALF_UP` empuja siempre al alza: el error
-tiene sesgo, no es ruido. **Dónde se cambia si Presto admite 6 decimales**:
-`PORCENTUALES_DECIMALES=6` en el `.env`, o `--decimales 6` en el CLI. Ni una
-línea de código.
+## Fase RED de la ronda 4
 
-## Fase RED de la ronda 3
-
-**T26/T27** — `python -m pytest tests/test_f002_porcentuales.py -k "r6_ or r6bis or r7_" -q --tb=short`
+**R6 ter, el test que decide** —
+`python -m pytest tests/test_f002_invariante.py -k reproduce_el_precio -q --tb=short`,
+con el defecto de la ronda 3 (4 decimales):
 
 ```
-tests\test_f002_porcentuales.py:24: in <module>
-    from infrastructure.bc3.bc3_porcentajes import (
-E   ImportError: cannot import name 'DECIMALES_POR_DEFECTO' from
-    'infrastructure.bc3.bc3_porcentajes'
-1 error in 0.45s
+E   AssertionError: COSTE_250128_Siroco_Rv4mlo.bc3: 245/259 (94.6%); primeros
+E   fallos: ['07.02.04: 40.9673 != 40.96', '32.02.04.36: 27.0029 != 27.01',
+E   '32.03.09.07: 18630.8836 != 18630.89', '34.01.17: 1.4742 != 1.48', ...]
+E   assert Decimal('0.9459459459459459459459459459') >= Decimal('0.98')
+
+E   AssertionError: lagunamodificado16julio.bc3: 320/400 (80.0%); primeros
+E   fallos: ['1038297: 5.3145 != 5.32', '1065284: 3.4055 != 3.4',
+E   '1071686: 46.7862 != 46.78', '1085788: 21.4130 != 21.42', ...]
+E   assert Decimal('0.8') >= Decimal('0.98')
+2 failed, 57 deselected in 0.27s
 ```
 
-Con el código de la ronda 2 el redondeo estaba clavado a 2 decimales: no había
-ni `DECIMALES_POR_DEFECTO`, ni `decimales_saneados`, ni forma de pedir 4. El
-mismo test, ya en verde, es el que fija los 172,59 / 172,60 de `C020615`.
+Con el defecto en 2, los dos pasan. Es la clase de test que pedía el reviewer:
+compara contra un número que no sale de nuestro cálculo, así que si alguien
+vuelve a tocar el redondeo, lo caza. La RED de la ronda 3 —el `ImportError` de
+`DECIMALES_POR_DEFECTO`, que entonces no existía— está en el commit `2f72b07`.
 
 ## Fase RED de las rondas 1 y 2 (resumida)
 
@@ -102,7 +106,7 @@ si algún `(1 + r_i)` ≤ 0, no toca el `~D` (R9 ter).
 | `application/pipeline/{pipeline,steps}.py` | `preprocessed_path`, `ConvertirPorcentualesStep` |
 | `interface_adapters/controllers/etl_controller.py` | `construir_pipeline()` con el step condicionado a la bandera |
 | `config/settings.py` | `porcentuales_a_ud` y `porcentuales_decimales` |
-| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 141 tests |
+| `tests/test_f002_{porcentuales,invariante,pipeline}.py` | 143 tests |
 | `tests/fixtures/f002_*.bc3` | 9 fixtures con números reales de `input/` |
 
 No se toca: `convert_to_material`, `build_tree_service`, los clones `.1`, la
@@ -117,18 +121,19 @@ veces más en vez de quedarse flojo. 1.602 `~D` comparados por cada `d`, ni uno
 fuera. Los `~D` de R9 van por R19 bis: su salida vuelve a dar el precio del
 `~C` del padre con cualquier `d`.
 
-| Padre | `P` | `.P0` + porcentuales con `d = 4` | suma |
+| Padre | `P` | `.P0` + porcentuales (defecto `d = 2`) | suma |
 |---|---|---|---|
-| `ICV260` | 291,50 | 225,9792 + 26,6204 + 38,9004 | **291,50** |
-| `ICV270` | 369,50 | 286,4471 + 33,7435 + 49,3094 | **369,50** |
-| `31.04.03.01` | 1.100,00 | 1.073,1707 + 26,8293 | **1.100,00** |
-| `32.03.04.32` | 1.117,65 | 955,2564 + 162,3936 | **1.117,65** |
+| `ICV260` | 291,50 | 225,98 + 26,62 + 38,9 | **291,50** |
+| `ICV270` | 369,50 | 286,45 + 33,74 + 49,31 | **369,50** |
+| `31.04.03.01` | 1.100,00 | 1.073,17 + 26,83 | **1.100,00** |
+| `32.03.04.32` | 1.117,65 | 955,26 + 162,39 | **1.117,65** |
 
-Literales de Presto escritos a mano en los tests: `43.15` → 81,5364 con `d = 4`
-(81,526 con `d = 2`, que era el error de la ronda 1); `05.06.29` → −1,46 y
-total 71,54; `07.02.05` → 16,00 con el clon a `0`; `1000080` (la captura de
-Elena Díaz) → 1,1997 con `d = 4` frente al exacto 1,199645 y al 1,20 que
-enseña su `~C`.
+Y **R6 ter**, la comprobación que no sale de nuestro cálculo: el importe de
+cada `~D` con porcentual sobre la salida da el precio que su `~C` declara en el
+99,2 % de Siroco y el 100 % de laguna, con umbral del 98 % y las cinco partidas
+de precio a mano excluidas. Literales de Presto en los tests: `43.15` → 81,526;
+`05.06.29` → −1,46 y total 71,54; `07.02.05` → 16,00 con el clon a `0`;
+`1000080` (la captura de Elena Díaz) → 1,20, el precio que enseña su `~C`.
 
 ## Decisiones y desviaciones
 
@@ -138,11 +143,10 @@ enseña su `~C`.
    que `config` importe `infrastructure`. `Settings` lee el `.env` tal cual y
    la pasada lo acota: el efecto observable de R6 bis es el mismo desde
    cualquier entrada (step, CLI o llamada directa).
-2. **R7 estrena recorte de ceros**, así que precios que antes salían `38.90`
-   ahora salen `38.9` y `1100.00` sale `1100`. Los tests de las rondas 1 y 2
-   se actualizaron a eso; donde el literal documentado era el de 2 decimales
-   (`43.15`, el caso del residuo, `1000080`) se fija `decimales=2` explícito
-   en vez de cambiar el número.
+2. **R7 recorta los ceros de relleno**, así que `38.90` sale `38.9` y
+   `1100.00` sale `1100`. Los tests que la ronda 3 pasó a 4 decimales han
+   vuelto a sus números, y los que quieren el encadenado exacto piden
+   `decimales=4` explícito en vez de depender del defecto.
 3. **Código del padre con marca de capítulo**: el clon se construye sobre el
    código sin el `#` (`~D|33.03.01#|` → `33.03.01.P1`) y el `~M` casa por ese
    mismo código. Solo se quita **una** marca; un `##` dejaría `01#.P1` y no hay
@@ -164,8 +168,9 @@ python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio
   `05.06.29`, `31.04.03.01`, `32.03.04.32`.
 - **T24**: importar `laguna_sin_pct.bc3` y confirmar `ICV260` = 291,50 (no
   336,39) e `ICV270` = 369,50.
-- **T32**: anotar **cuántos decimales acepta Presto** al importar. Si admite 6,
-  `PORCENTUALES_DECIMALES=6` en el `.env` (o `--decimales 6`) y repetir.
+- **T32**: anotar **cuántos decimales acepta Presto** al importar. Ya no decide
+  el valor —lo decide R6 ter con datos—, pero si algún día interesa subirlo es
+  una línea del `.env`.
 
 **Resultado de las tres: PENDIENTE** — nadie las ha ejecutado; quedan anotadas
 en `progress/current.md`.
