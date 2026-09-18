@@ -1,0 +1,18 @@
+~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||
+~C|VALV1|Ud.|Válvula de bola, ½"|19.01|150626|0|
+~C|VALV2|Ud.|Válvula de bola, 3/4"|30.16|190526|0|
+~C|VALV4|Ud.|Válvula de bola, 1¼"|33.14|150626|0|
+~C|VALV5|Ud.|Válvula de bola, 1½"|43.4|150626|0|
+~C|VALV6|Ud.|Válvula de bola, 2"|55.89|150626|0|
+~C|VALV1.1|Ud.|Válvula de bola con ESPAÑOL y acentuación|15.5|150626|3|
+~C|PH0102270|Ud.|Pequeño material de fontanería|27.5|150626|3|
+~C|%%jefedeobrayencayGF4%||14 mesesx 12.000|11.78|150626|0|
+~C|%%beneficioseinsa||beneficio SEINSA|15.4|150626|0|
+~T|VALV1|Suministro y montaje de válvula de paso total, marca TOUR &
+ANDERSSON o equivalente, con maneta de acción rápida. Incluída la
+pequeña tornillería y el señalizador de posición.
+~D|VALV1|VALV1.1\1\1\%%jefedeobrayencayGF4%\1\0.1178\|
+~D|VALV4|PH0102270\1\1\%%beneficioseinsa\1\0.154\|
+~D|VALV5|PH0102270\1\1\|
+~D|VALV6|PH0102270\1\2\|
+~M|VALV1\%%jefedeobrayencayGF4%|32\4\1\2\|66||
