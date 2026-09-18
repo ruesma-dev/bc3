@@ -5,86 +5,76 @@
 conservando el importe de Presto** · rama `feature/F-002-porcentuales-a-ud` ·
 rigor `critico` · estado `in_progress`.
 
-**Reviewer: APPROVED** en la pasada 3 (incremental desde `4af79bf`) →
-`progress/review_F-002.md`. Implementación: `progress/impl_F-002.md`.
-`bash harness/init.sh` en verde: **457 tests**, cobertura **98,7 %** de las
-389 líneas cambiadas, campaña de mutación completa **168/168 sin
-supervivientes**.
+**Ronda 4 en curso: se revierte el criterio de la ronda 3.** El diagnóstico de
+entonces era erróneo y el dato nuevo lo tumba: contrastando contra el precio
+que el `~C` de cada partida declara —que lo escribió Presto al exportar—,
+**2 decimales acierta 260/262 (99,2 %) en Siroco y 402/402 (100 %) en laguna**,
+mientras 4 baja a 94,3 % y 80,1 %. Presto redondea a céntimos CADA línea del
+descompuesto, así que más precisión se aleja de su resultado. Y `C020615`, el
+caso que motivó la ronda 3, declara **172,6** en su propio `~C`: el 172,59 de
+4 decimales salía de un cálculo exacto, no de Presto.
 
-**NO se marca `done`**: faltan las dos verificaciones MANUALES del humano
-(T15, T24 y T32). Es la condición que pusieron el reviewer y el líder.
+El defecto vuelve a **2** y queda sujeto por **R6 ter**, el test que compara
+contra ese número ajeno con umbral del 98 %. Toda la infraestructura de la
+ronda 3 se queda: `PORCENTUALES_DECIMALES`, el rango 2..6, `--decimales` y el
+formateo sin ceros de relleno.
 
-## Las dos rondas, y por qué hubo una segunda
+**NO se marca `done`**: faltan las TRES verificaciones MANUALES del humano
+(T15 Siroco, T24 laguna, T32 decimales en Presto).
 
-La ronda 1 se aprobó con una R9 que solo era correcta cuando el `~D` tenía
-UNA línea porcentual. Con dos, el precio del padre —que ya es el final, con
-los porcentajes dentro— se asignaba al primer clon y el segundo porcentaje se
-volvía a aplicar encima: `ICV260` salía **336,39** en vez de 291,50, un
-+15,4 %. Lo detectó el líder verificando la salida real, no la suite.
+## Las tres rondas
 
-R9 se rehízo **reconstruyendo la base implícita** (`base = P / Π(1 + r_i)`,
-línea `<padre>.P0` más una línea por porcentual, residuo absorbido en la
-base), y se añadió **R19 bis**, que es la comprobación que faltaba: el importe
-calculado sobre la SALIDA tiene que ser igual al precio del `~C` del padre.
-El reviewer reprodujo el experimento restaurando el código viejo con los tests
-nuevos y confirmó el rojo `ICV260: 336.39 != 291.50`.
+1. **Ronda 1** — la pasada completa. Aprobada.
+2. **Ronda 2** — R9 inflaba las partidas con dos porcentuales (`ICV260`
+   336,39 en vez de 291,50). Se rehízo reconstruyendo la base implícita y se
+   añadió **R19 bis** (el descompuesto de la salida debe dar el precio del
+   `~C` del padre).
+3. **Ronda 3** — el humano importó en Presto y el convertido salía **381,64 €
+   por encima**. Desglosado: en 8 de los 9 capítulos con diferencia el
+   convertido da **exactamente** lo que el `~C` del capítulo declaraba y el
+   original no (C18: declara 2.826.961,28, convertido 2.826.961,28, original
+   2.826.618,05) — eso es fidelidad recuperada. El defecto real estaba en
+   C06: `C020615` pasaba de 172,59 a 172,60 por redondeo y, con medición de
+   1.833,59 m², eran 18,34 €. Ahora **los decimales del precio del clon son
+   configurables** (`PORCENTUALES_DECIMALES`, por defecto 4, rango 2..6).
 
-## Verificación independiente del líder (2026-09-18, sobre la salida real)
-
-| Presupuesto | Resto del presupuesto (entrada → salida) | Desvío |
-|---|---|---|
-| Siroco | 7.814.258,82 → 7.814.258,85 | **+0,03 €** |
-| laguna (Elena) | 24.052.016,95 → 24.052.017,12 | **+0,17 €** |
-
-Céntimos de redondeo sobre 7,8 M€ y 24 M€. Y las cuatro partidas de R9, que
-antes no cuadraban con su propio descompuesto, ahora sí:
-
-| Partida | Descompuesto de la salida | Precio del `~C` |
-|---|---|---|
-| `31.04.03.01` | 1.100,00 | 1.100,00 |
-| `32.03.04.32` | 1.117,65 | 1.117,65 |
-| `ICV260` | 291,50 | 291,50 |
-| `ICV270` | 369,50 | 369,50 |
+4. **Ronda 4** — el contraste anterior se hacía contra un simulador de cálculo
+   exacto, no contra Presto. Contra el `~C` declarado, el ganador es 2.
 
 ## Pendiente del humano
 
-1. **T15 · Siroco.** Fichero ya generado con la regla NUEVA:
-   `output/siroco_sin_pct.bc3` (262 `~D` con porcentual, 319 líneas
-   convertidas, 21 conceptos eliminados). Importar en Presto y confirmar el
-   total y `43.15`, `05.06.29`, `31.04.03.01`, `32.03.04.32`.
-2. **T24 · laguna.** Fichero ya generado: `output/laguna_sin_pct.bc3` (406
-   `~D`, 948 líneas convertidas). Confirmar `ICV260` = 291,50 (no 336,39) e
+1. **T15 · Siroco** — `output/siroco_sin_pct.bc3`, que hay que regenerar con
+   el defecto nuevo (2). Total y `43.15`, `05.06.29`, `31.04.03.01`,
+   `32.03.04.32`.
+2. **T24 · laguna** — `output/laguna_sin_pct.bc3`, ídem. `ICV260` = 291,50 e
    `ICV270` = 369,50.
-3. **T32 · decimales que traga Presto.** La salida ya sale con **4 decimales**
-   en el precio de los clones (`PORCENTUALES_DECIMALES`, por defecto 4). Al
-   importar en Presto hay que anotar **cuántos decimales acepta**: si admite 6,
-   se sube el valor en el `.env` —una línea, sin tocar código ni spec— y se
-   repite la importación. Con 2 decimales el desvío medido era de +165 € en
-   Siroco y +143 € en laguna; con 4 baja a +1,50 € y +3,39 €, y con 6 es cero.
-   Caso de referencia: `C020615` de laguna, 172,59 con 4 decimales frente a
-   172,60 con 2, sobre una medición de 1.833,59 m².
-4. **R13 sobre `input/presupuesto.bc3`**: borra 42 `~C` porcentuales sin
-   convertir ninguna línea, por ser un banco de precios. Sin decidir.
-5. **Porte a `arnes-base`** de las dos lecciones del arnés que deja esta
-   feature (ver abajo). Sin hacer.
-6. **La semántica de dominio de `docs/ARCHITECTURE.md`** sigue sin validación
-   humana formal.
+3. **T32 · decimales** — ya no hace falta para decidir el valor (lo decide
+   R6 ter con datos), pero sigue siendo útil saber **cuántos decimales acepta
+   Presto**: si alguna vez interesa subirlo, es una línea en el `.env`.
+4. **Confirmar en el Presto de Elena cuánto dice C18.** Si 2.826.961,28, el
+   convertido es el fiel y la diferencia de 381,64 € es fidelidad recuperada,
+   no error.
+5. **R13 sobre `input/presupuesto.bc3`**: borra 42 `~C` porcentuales sin
+   convertir ninguna línea (banco de precios). Sin decidir.
+6. **El suelo de 0,01 de R19** (lo levanta el reviewer): el invariante general
+   no ve un error de ~0,009 € por `~D`, del mismo orden que el céntimo que
+   costó la ronda 3. Hoy eso lo cubren R19 bis y los tests con números de
+   Presto. Si se quiere que R19 también lo cubra, hay que hacer proporcional
+   su sumando fijo.
 
-## Para `arnes-base` (regla de propagación del CLAUDE.md del ecosistema)
+## Para `arnes-base` (regla de propagación)
 
-1. **C4, dobles de test**: extender el punto a los sustitutos instalados con
-   `monkeypatch.setattr`, comparando `inspect.signature` con la del símbolo
-   sustituido. Aquí un `**kwargs` de más dejó sin probar la única línea que
-   corre en producción, y ni la cobertura del 98 % ni la mutación lo
-   delataron.
-2. **Lección de la ronda 2**: una regla que el invariante excluye por diseño
-   necesita su propia comprobación, o queda sin red. R9 estaba fuera de R19
-   y por eso el defecto sobrevivió a una implementación y a una revisión
-   completas.
+1. **C4, dobles de test**: extender a los sustitutos puestos con
+   `monkeypatch.setattr`, comparando `inspect.signature` con el original.
+2. **Una regla que el invariante excluye por diseño necesita su propia
+   comprobación**, o queda sin red (le pasó a R9).
+3. **Cuando una transformación toca dinero, al menos un test debe comparar la
+   salida contra un número de fuera del sistema** —el `~C` del fichero
+   original, una captura del ERP— y no solo contra otro resultado de la misma
+   función. Los dos defectos de esta feature los encontró el humano
+   importando en Presto, y los dos eran errores de regla, no de código.
 
-## Incidencias de la sesión
+## Aviso de tamaño
 
-Dos agentes se colgaron (watchdog a los 10 min): el implementer durante la
-primera campaña de mutación de la ronda 2 —dejó cuatro worktrees huérfanos en
-`%TEMP%`, limpiados con `git worktree prune`— y el reviewer al empezar la
-pasada 3. Los dos se retomaron sin perder trabajo.
+`requirements.md` 150/150 y `design.md` 250/250: en el tope exacto. La
+próxima corrección obliga a resumir y enlazar.
