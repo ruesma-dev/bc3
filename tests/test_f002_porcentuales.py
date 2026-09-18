@@ -1115,3 +1115,108 @@ def test_f002_r7_el_menos_cero_sigue_escribiendose_cero_con_cualquier_decimal():
         assert formatear_precio(Decimal("-0.000001"), decimales) in {"0", "-0.000001"}
         texto = formatear_precio(Decimal("0.00001"), decimales)
         assert "E" not in texto.upper() and "," not in texto
+
+
+# --------------------------------------------------------------------------- #
+# R24 / R25 · Limpieza del texto (lo que Sigrid no se tragaba)                 #
+# --------------------------------------------------------------------------- #
+def _resumen(lineas: list[str], codigo: str) -> str:
+    return _registro(lineas, f"~C|{codigo}|").split("|")[3]
+
+
+def test_f002_r24_los_cuatro_valv_salen_con_el_resumen_limpio(tmp_path):
+    """Las cuatro partidas que Sigrid dejó sin descompuesto, por los no-ASCII.
+
+    En el capítulo conviven ASCII puras, que sí importaron, y estas cuatro. El
+    texto exacto antes y después, con la limitación conocida de `clean_text`:
+    `½"` queda en `12"` y `1¼"` en `114"`, igual que en los conceptos que hoy
+    ya funcionan (`112"`, `114"`).
+    """
+    entrada = leer(FIXTURES / "f002_acentos.bc3")
+    assert _resumen(entrada, "VALV1") == 'Válvula de bola, ½"'
+    assert _resumen(entrada, "VALV4") == 'Válvula de bola, 1¼"'
+
+    salida = tmp_path / "limpio.bc3"
+    informe = convertir_porcentuales(FIXTURES / "f002_acentos.bc3", salida)
+    lineas = leer(salida)
+    assert _resumen(lineas, "VALV1") == 'Valvula de bola, 12"'
+    assert _resumen(lineas, "VALV2") == 'Valvula de bola, 3/4"'
+    assert _resumen(lineas, "VALV4") == 'Valvula de bola, 114"'
+    assert _resumen(lineas, "VALV5") == 'Valvula de bola, 112"'
+    assert _resumen(lineas, "VALV6") == 'Valvula de bola, 2"'
+    assert informe.conceptos_limpiados == 7
+
+
+def test_f002_r24_el_clon_y_la_linea_de_base_heredan_el_resumen_ya_limpio(tmp_path):
+    """El clon copia el resumen del concepto porcentual y la base el del padre."""
+    salida = tmp_path / "limpio.bc3"
+    convertir_porcentuales(FIXTURES / "f002_acentos.bc3", salida)
+    lineas = leer(salida)
+    assert _resumen(lineas, "VALV1.1") == "Valvula de bola con ESPANOL y acentuacion"
+    assert _resumen(lineas, "PH0102270") == "Pequeno material de fontaneria"
+    # VALV5 y VALV6 no tienen porcentual: no generan clon. VALV4 sí.
+    assert _resumen(lineas, "VALV4.P1") == "beneficio SEINSA"
+
+
+def test_f002_r24_el_texto_largo_tambien_se_limpia(tmp_path):
+    """El `~T` y sus líneas de continuación son el mismo registro de texto."""
+    salida = tmp_path / "limpio.bc3"
+    convertir_porcentuales(FIXTURES / "f002_acentos.bc3", salida)
+    crudo = salida.read_bytes().decode("latin-1")
+    assert "válvula" not in crudo and "Incluída" not in crudo
+    assert "valvula de paso total" in crudo
+    assert "Incluida la" in crudo
+    assert "senalizador de posicion" in crudo
+
+
+def test_f002_r24_con_la_bandera_apagada_el_texto_no_se_toca(tmp_path):
+    salida = tmp_path / "sucio.bc3"
+    informe = convertir_porcentuales(FIXTURES / "f002_acentos.bc3", salida,
+                                     limpiar_texto=False)
+    lineas = leer(salida)
+    assert _resumen(lineas, "VALV1") == 'Válvula de bola, ½"'
+    assert informe.conceptos_limpiados == 0
+
+
+def test_f002_r18_con_la_limpieza_apagada_la_salida_es_byte_a_byte(tmp_path):
+    """Sin limpieza, lo único que cambia son las líneas de R18 (a), (b) y (c).
+
+    Es la garantía que permite razonar sobre la pasada: si esto se relaja, deja
+    de poder afirmarse que no toca nada más.
+    """
+    for fixture in sorted(FIXTURES.glob("f002_*.bc3")):
+        destino = tmp_path / f"crudo_{fixture.name}"
+        convertir_porcentuales(fixture, destino, limpiar_texto=False)
+        entrada = fixture.read_bytes().decode("latin-1").splitlines(keepends=True)
+        salida = destino.read_bytes().decode("latin-1").splitlines(keepends=True)
+        # (a) ~D reescritos, (b) ~C/~T de porcentuales borrados, (c) ~M remapeados.
+        sin_tocar = [l for l in entrada
+                     if not l.startswith(("~D|", "~M|"))
+                     and not (l.startswith(("~C|", "~T|"))
+                              and l.split("|")[1].strip().startswith("%"))
+                     and l.startswith("~")]
+        for linea in sin_tocar:
+            assert linea in salida, f"{fixture.name}: cambió {linea!r}"
+
+
+def test_f002_r25_la_limpieza_no_toca_ni_un_codigo_ni_un_numero(tmp_path):
+    """Códigos, precios, factores, rendimientos y unidades, campo a campo."""
+    con = tmp_path / "con.bc3"
+    sin = tmp_path / "sin.bc3"
+    convertir_porcentuales(FIXTURES / "f002_acentos.bc3", con)
+    convertir_porcentuales(FIXTURES / "f002_acentos.bc3", sin, limpiar_texto=False)
+
+    def campos_no_textuales(lineas):
+        conceptos, descompuestos = {}, {}
+        for linea in lineas:
+            partes = linea.split("|")
+            if linea.startswith("~C|"):
+                # código, unidad, precio, fecha y tipo; el resumen (3) fuera.
+                conceptos[partes[1]] = (partes[2], partes[4], partes[5], partes[6])
+            elif linea.startswith("~D|"):
+                descompuestos[partes[1]] = partes[2]
+        return conceptos, descompuestos
+
+    assert campos_no_textuales(leer(con)) == campos_no_textuales(leer(sin))
+    # Y el resumen sí cambia, para que la comparación de arriba signifique algo.
+    assert _resumen(leer(con), "VALV1") != _resumen(leer(sin), "VALV1")
