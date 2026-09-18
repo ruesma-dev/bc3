@@ -787,7 +787,7 @@ def test_f002_r18_el_texto_largo_de_un_concepto_vivo_no_se_pierde(tmp_path):
          "~D|09.13.01|MO0010\\1\\1\\%RF\\1\\0.03\\|\r\n").encode("latin-1")
     )
     salida = tmp_path / "salida.bc3"
-    convertir_porcentuales(entrada, salida)
+    convertir_porcentuales(entrada, salida, limpiar_texto=False)
     lineas = leer(salida)
     # Lo que va antes del primer registro tampoco se pierde.
     assert lineas[0] == "una línea suelta antes del primer registro"
@@ -796,6 +796,10 @@ def test_f002_r18_el_texto_largo_de_un_concepto_vivo_no_se_pierde(tmp_path):
     # El del porcentual eliminado se va entero, continuación incluida (R13).
     assert not [l for l in lineas if l.startswith("~T|%RF|")]
     assert "que también sigue en otra línea" not in lineas
+    # Con la limpieza de R24 la continuación sigue ahí, ya sin acentos (R18 d).
+    limpia = tmp_path / "limpia.bc3"
+    convertir_porcentuales(entrada, limpia)
+    assert "que sigue en otra linea fisica" in leer(limpia)
 
 
 def test_f002_r18_un_fichero_vacio_sale_vacio(tmp_path):
@@ -1018,6 +1022,23 @@ def test_f002_r22_el_cli_puede_copiar_sin_convertir(tmp_path):
     assert salida.read_bytes() == (FIXTURES / "f002_cadena.bc3").read_bytes()
 
 
+def test_f002_r24_el_cli_puede_dejar_el_texto_sin_limpiar(tmp_path):
+    """`--sin-limpiar-texto` apaga R24 aunque el `.env` la traiga encendida."""
+    sucia, informe = tmp_path / "sucia.bc3", tmp_path / "sucia.csv"
+    assert cli.main([str(FIXTURES / "f002_acentos.bc3"), str(sucia),
+                     "--informe", str(informe), "--sin-limpiar-texto"]) == 0
+    assert _resumen(leer(sucia), "VALV1") == 'Válvula de bola, ½"'
+    csv_sucio = informe.read_bytes().decode("utf-8-sig")
+    assert "conceptos_con_texto_limpiado;0" in csv_sucio
+
+    limpia, informe2 = tmp_path / "limpia.bc3", tmp_path / "limpia.csv"
+    assert cli.main([str(FIXTURES / "f002_acentos.bc3"), str(limpia),
+                     "--informe", str(informe2)]) == 0
+    assert _resumen(leer(limpia), "VALV1") == 'Valvula de bola, 12"'
+    csv_limpio = informe2.read_bytes().decode("utf-8-sig")
+    assert "conceptos_con_texto_limpiado;7" in csv_limpio
+
+
 # --------------------------------------------------------------------------- #
 # R6 / R6 bis / R7 · Decimales del precio del clon                             #
 # --------------------------------------------------------------------------- #
@@ -1189,11 +1210,16 @@ def test_f002_r18_con_la_limpieza_apagada_la_salida_es_byte_a_byte(tmp_path):
         convertir_porcentuales(fixture, destino, limpiar_texto=False)
         entrada = fixture.read_bytes().decode("latin-1").splitlines(keepends=True)
         salida = destino.read_bytes().decode("latin-1").splitlines(keepends=True)
+        # Porcentual es tanto el de código `%` como el de unidad `%` (D1).
+        pct = {l.split("|")[1] for l in entrada
+               if l.startswith("~C|")
+               and (l.split("|")[1].strip().startswith("%")
+                    or l.split("|")[2].strip() == "%")}
         # (a) ~D reescritos, (b) ~C/~T de porcentuales borrados, (c) ~M remapeados.
         sin_tocar = [l for l in entrada
                      if not l.startswith(("~D|", "~M|"))
                      and not (l.startswith(("~C|", "~T|"))
-                              and l.split("|")[1].strip().startswith("%"))
+                              and l.split("|")[1] in pct)
                      and l.startswith("~")]
         for linea in sin_tocar:
             assert linea in salida, f"{fixture.name}: cambió {linea!r}"

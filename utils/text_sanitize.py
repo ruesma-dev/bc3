@@ -25,6 +25,23 @@ import string
 _ALLOWED: set[str] = set(string.printable) | {"|", "~", "\\"}
 
 # --------------------------------------------------------------------------- #
+#  Letras que NFKD no descompone: se transliteran a mano                      #
+# --------------------------------------------------------------------------- #
+# NFKD deja intactas las letras con trazo o ligadas (Ø, æ, ß) y convierte el
+# signo micro µ en la mu griega μ. Todas son `isalnum()`, así que se colaban
+# como no-ASCII pese a que esta limpieza promete lo contrario. Sigrid no
+# importa el descompuesto de un concepto cuyo resumen las lleve (F-002 R25),
+# de modo que se traducen antes de quitar los diacríticos.
+_TRANSLITERACIONES: dict[str, str] = {
+    "Ø": "O", "ø": "o",
+    "Æ": "AE", "æ": "ae",
+    "Œ": "OE", "œ": "oe",
+    "ß": "ss",
+    "µ": "u", "μ": "u",
+}
+
+
+# --------------------------------------------------------------------------- #
 #  Strip accents (á -> a, ñ -> n, etc.)                                       #
 # --------------------------------------------------------------------------- #
 def _strip_accents(txt: str) -> str:
@@ -32,6 +49,7 @@ def _strip_accents(txt: str) -> str:
     Devuelve `txt` sin diacríticos usando NFKD
     (separa los caracteres base de sus marcas de acento y descarta las marcas).
     """
+    txt = "".join(_TRANSLITERACIONES.get(ch, ch) for ch in txt)
     nfkd = unicodedata.normalize("NFKD", txt)
     return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
@@ -62,8 +80,9 @@ def clean_text(text: str) -> str:
     cleaned = "".join(
         ch
         for ch in text
-        if ch in _ALLOWED               # separadores y ASCII
-        or ch.isalnum()                 # letras / dígitos sin acentos
-        or ch.isspace()                 # espacios, tabs, saltos de línea
+        if ch.isascii()                 # fuera todo no-ASCII: es lo prometido
+        and (ch in _ALLOWED             # separadores y ASCII imprimible
+             or ch.isalnum()            # letras / dígitos sin acentos
+             or ch.isspace())           # espacios, tabs, saltos de línea
     )
     return cleaned

@@ -33,6 +33,7 @@ from infrastructure.bc3.bc3_modifier import (
     _format_d_triplets,
     _shorten_code_unique,
 )
+from utils.text_sanitize import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class InformePorcentuales:
     descompuestos: int = 0
     lineas_convertidas: int = 0
     conceptos_eliminados: int = 0
+    conceptos_limpiados: int = 0
     decimales: int = DECIMALES_POR_DEFECTO
     casos: list[CasoPorcentual] = field(default_factory=list)
 
@@ -570,16 +572,55 @@ def _decidir_conceptos_a_eliminar(lineas: Sequence[str],
 # --------------------------------------------------------------------------- #
 # Reescritura (pasada 2)                                                       #
 # --------------------------------------------------------------------------- #
+def _limpiar_campo(texto: str) -> str:
+    """R24 · El MISMO `clean_text` que usa `convert_to_material`.
+
+    Una sola limpieza en el repositorio: dos divergen y el resultado dependería
+    de por dónde hubiera pasado el fichero. Se aplica al resumen del `~C`, al
+    texto del `~T` y al resumen de clones y líneas de base; nunca a códigos,
+    precios, factores, rendimientos ni unidades (limpiar la unidad sería
+    unificarla, y eso es de `convert_to_material`).
+    """
+    return clean_text(texto)
+
+
+def _limpiar_linea_c(linea: str) -> str:
+    """Devuelve el `~C` con el resumen limpio; el resto de campos, intactos."""
+    campos = _campos(linea)
+    if len(campos) <= 3:
+        return linea
+    limpio = _limpiar_campo(campos[3])
+    if limpio == campos[3]:
+        return linea
+    campos[3] = limpio
+    return "|".join(campos) + _terminador_de(linea)
+
+
+def _limpiar_linea_t(linea: str) -> str:
+    """Devuelve el `~T` con su texto limpio. El texto puede llevar `|`."""
+    cabecera, _, texto = linea.rstrip("\r\n").partition("|")
+    codigo, _, cuerpo = texto.partition("|")
+    limpio = _limpiar_campo(cuerpo)
+    if limpio == cuerpo:
+        return linea
+    return f"{cabecera}|{codigo}|{limpio}" + _terminador_de(linea)
+
+
 def _terminador_de(linea: str) -> str:
     """El salto de línea que traía esa línea, para devolverlo tal cual."""
     return linea[len(linea.rstrip("\r\n")):]
 
 
 def _linea_c_de_clon(clon: LineaClon | LineaBase, terminador: str,
-                     decimales: int) -> str:
-    """`~C` de un clon o de una línea de base: unidad UD, tipo 3 (R4)."""
+                     decimales: int, limpiar: bool) -> str:
+    """`~C` de un clon o de una línea de base: unidad UD, tipo 3 (R4).
+
+    El resumen lo heredan del concepto porcentual o del padre, así que arrastra
+    sus acentos: se limpia aquí igual que el de cualquier otro `~C` (R24).
+    """
+    resumen = _limpiar_campo(clon.resumen) if limpiar else clon.resumen
     return (
-        f"~C|{clon.codigo}|{UNIDAD_CLON}|{clon.resumen}|"
+        f"~C|{clon.codigo}|{UNIDAD_CLON}|{resumen}|"
         f"{formatear_precio(clon.precio, decimales)}|{clon.fecha}|{TIPO_CLON}|{terminador}"
     )
 
@@ -624,11 +665,14 @@ def convertir_porcentuales(src: Path,
                            *,
                            encoding: str = "latin-1",
                            activo: bool = True,
-                           decimales: int = DECIMALES_POR_DEFECTO) -> InformePorcentuales:
+                           decimales: int = DECIMALES_POR_DEFECTO,
+                           limpiar_texto: bool = True) -> InformePorcentuales:
     """PASADA 2: escribe en `dst` el BC3 con los porcentuales ya convertidos.
 
     Con `activo=False` copia el fichero sin tocar ni una línea (R21). Si la
     entrada no existe lanza `FileNotFoundError` y no crea la salida (R23).
+    Con `limpiar_texto=False` los resúmenes y los `~T` salen como entraron, y
+    entonces la salida es byte a byte la entrada salvo (a), (b) y (c) de R18.
     """
     src, dst = Path(src), Path(dst)
     if not src.exists():
@@ -646,14 +690,19 @@ def convertir_porcentuales(src: Path,
 
     salida: list[str] = []
     borrando = False  # dentro de un registro multilínea que se está eliminando
+    en_texto = False  # dentro de un ~T, cuya continuación es más texto suyo
     for numero, linea in enumerate(lineas):
         if not linea.startswith("~"):
             # Continuación del registro anterior (los ~T largos la usan).
             if not borrando:
+                if limpiar_texto and en_texto:
+                    limpia = _limpiar_campo(linea.rstrip("\r\n"))
+                    linea = limpia + _terminador_de(linea)
                 salida.append(linea)
             continue
 
         borrando = False
+        en_texto = linea.startswith("~T|")
         if linea.startswith(("~C|", "~T|")):
             campos = _campos(linea)
             codigo = campos[1]  # existe siempre: la línea empieza por "~C|" o "~T|"
@@ -668,13 +717,26 @@ def convertir_porcentuales(src: Path,
             # `<padre>.P0` y debajo sus porcentuales.
             base = [descompuesto.base] if descompuesto.base is not None else []
             emitidos = base + list(descompuesto.clones)
-            salida.extend(_linea_c_de_clon(c, terminador, plan.informe.decimales)
+            salida.extend(_linea_c_de_clon(c, terminador, plan.informe.decimales,
+                                           limpiar_texto)
                           for c in emitidos)
             salida.append(_reescribir_d(linea, descompuesto))
             continue
 
         if linea.startswith("~M|"):
             salida.append(_remapear_m(linea, plan.remapeo_m))
+            continue
+
+        if limpiar_texto and linea.startswith("~C|"):
+            # R24: solo el resumen; el código, la unidad y los números, intactos.
+            limpia = _limpiar_linea_c(linea)
+            if limpia != linea:
+                plan.informe.conceptos_limpiados += 1
+            salida.append(limpia)
+            continue
+
+        if limpiar_texto and linea.startswith("~T|"):
+            salida.append(_limpiar_linea_t(linea))
             continue
 
         salida.append(linea)
