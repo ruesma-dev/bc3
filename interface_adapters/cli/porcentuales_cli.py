@@ -44,6 +44,7 @@ def escribir_informe(informe: InformePorcentuales, destino: Path) -> Path:
         escritor.writerow(("lineas_convertidas", informe.lineas_convertidas))
         escritor.writerow(("conceptos_eliminados", informe.conceptos_eliminados))
         escritor.writerow(("decimales_del_precio", informe.decimales))
+        escritor.writerow(("conceptos_con_texto_limpiado", informe.conceptos_limpiados))
         escritor.writerow(())
         escritor.writerow(CABECERA_CASOS)
         for caso in informe.casos:
@@ -69,6 +70,8 @@ def _argumentos(argv: Sequence[str] | None) -> argparse.Namespace:
                             help=f"CSV del informe (por defecto {INFORME_POR_DEFECTO})")
     analizador.add_argument("--sin-conversion", action="store_true",
                             help="copia el fichero sin tocarlo (bandera apagada)")
+    analizador.add_argument("--sin-limpiar-texto", action="store_true",
+                            help="deja los resúmenes y los ~T tal cual (R24)")
     analizador.add_argument("--decimales", type=str, default=None,
                             help="decimales del precio de los clones, 2..6 "
                                  "(por defecto, PORCENTUALES_DECIMALES del .env)")
@@ -88,6 +91,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         informe = convertir_porcentuales(
             args.entrada, args.salida, encoding=ajustes.encoding, activo=activo,
             decimales=decimales,
+            limpiar_texto=(ajustes.porcentuales_limpiar_texto
+                           and not args.sin_limpiar_texto),
         )
     except FileNotFoundError:
         logger.error("No existe el fichero de entrada: %s", args.entrada)
@@ -96,10 +101,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ruta_informe = escribir_informe(informe, args.informe)
     logger.info(
         "%s → %s | %d ~D con porcentual, %d líneas convertidas, "
-        "%d conceptos eliminados, %d casos excepcionales, %d decimales",
+        "%d conceptos eliminados, %d casos excepcionales, %d decimales, "
+        "%d textos limpiados",
         args.entrada, args.salida, informe.descompuestos,
         informe.lineas_convertidas, informe.conceptos_eliminados,
-        len(informe.casos), informe.decimales,
+        len(informe.casos), informe.decimales, informe.conceptos_limpiados,
     )
     logger.info("Informe → %s", ruta_informe)
     return 0

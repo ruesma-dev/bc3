@@ -49,13 +49,15 @@ class ConvertirPorcentualesStep(Step):
             ctx.original_path, destino,
             encoding=ctx.settings.encoding,
             decimales=ctx.settings.porcentuales_decimales,
+            limpiar_texto=ctx.settings.porcentuales_limpiar_texto,
         )
         ctx.preprocessed_path = destino
         logger.info(
             "Porcentuales a UD → %s (%d ~D, %d líneas, %d conceptos eliminados,"
-            " %d decimales)",
+            " %d decimales, %d textos limpiados)",
             destino, informe.descompuestos, informe.lineas_convertidas,
             informe.conceptos_eliminados, informe.decimales,
+            informe.conceptos_limpiados,
         )
 
 

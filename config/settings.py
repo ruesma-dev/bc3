@@ -49,6 +49,10 @@ class Settings:
     # El rango admitido (2..6) y la caída al defecto los aplica
     # `bc3_porcentajes.decimales_saneados`, que es quien redondea.
     porcentuales_decimales: int = _env_int("PORCENTUALES_DECIMALES", "2")
+    # F-002 R24: limpiar el texto (resúmenes y `~T`) con el mismo `clean_text`
+    # que usa `convert_to_material`. Sigrid no importa el descompuesto de los
+    # conceptos cuyo resumen lleva no-ASCII.
+    porcentuales_limpiar_texto: bool = _env_bool("PORCENTUALES_LIMPIAR_TEXTO", "true")
 
     # ---------------- Salida ----------------
     csv_sep: str = os.getenv("CSV_SEPARATOR", ";")
