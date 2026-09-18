@@ -36,6 +36,7 @@ from infrastructure.bc3.bc3_porcentajes import (
     triples_de_cuerpo,
 )
 from interface_adapters.cli import porcentuales_cli as cli
+from utils.text_sanitize import clean_text
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ENTRADAS = Path(__file__).resolve().parents[1] / "input"
@@ -1188,6 +1189,41 @@ def test_f002_r24_el_texto_largo_tambien_se_limpia(tmp_path):
     assert "valvula de paso total" in crudo
     assert "Incluida la" in crudo
     assert "senalizador de posicion" in crudo
+
+
+def test_f002_r24_la_limpieza_compartida_devuelve_siempre_ascii():
+    """El único `clean_text` del proyecto prometía ASCII y no lo cumplía.
+
+    NFKD no descompone las letras con trazo ni las ligadas (Ø, æ, ß) y convierte
+    el signo micro µ en la mu griega μ: todas son `isalnum()` y se colaban. En
+    `input/` quedaban 149 `Ø`, 32 `μ`, 18 `ø` y 3 `ß` después de limpiar.
+    """
+    limpio = clean_text('Tubo Ø 63 mm, 10 µm, ßeta, æ, Ω, ½"')
+    assert limpio.isascii()
+    assert limpio == 'Tubo O 63 mm, 10 um, sseta, ae, , 12"'
+    assert clean_text("SEGÚN ©norma") == "SEGUN norma"
+
+
+def test_f002_r24_un_c_truncado_se_limpia_y_uno_sin_resumen_no_se_toca(tmp_path):
+    """Hay `~C` sin los campos de cola en los BC3 de verdad.
+
+    Y la línea suelta que va antes del primer registro no es la continuación de
+    ningún `~T`: se copia con sus acentos, porque nadie ha abierto un texto.
+    """
+    entrada = tmp_path / "corto.bc3"
+    entrada.write_bytes(
+        ("un rótulo suelto antes del primer registro\r\n"
+         "~V|RIB Spain|FIEBDC-3/2016|Presto 19.02||ANSI||2||||\r\n"
+         "~C|VALV9|Ud.|Válvula sin más campos\r\n"
+         "~C|VALV8|Ud.\r\n").encode("latin-1")
+    )
+    salida = tmp_path / "corto_limpio.bc3"
+    informe = convertir_porcentuales(entrada, salida)
+    lineas = leer(salida)
+    assert lineas[0] == "un rótulo suelto antes del primer registro"
+    assert "~C|VALV9|Ud.|Valvula sin mas campos" in lineas
+    assert "~C|VALV8|Ud." in lineas
+    assert informe.conceptos_limpiados == 1
 
 
 def test_f002_r24_con_la_bandera_apagada_el_texto_no_se_toca(tmp_path):

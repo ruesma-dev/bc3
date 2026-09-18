@@ -77,12 +77,9 @@ def clean_text(text: str) -> str:
 
     text = _strip_accents(text)
 
-    cleaned = "".join(
-        ch
-        for ch in text
-        if ch.isascii()                 # fuera todo no-ASCII: es lo prometido
-        and (ch in _ALLOWED             # separadores y ASCII imprimible
-             or ch.isalnum()            # letras / dígitos sin acentos
-             or ch.isspace())           # espacios, tabs, saltos de línea
-    )
+    # `_ALLOWED` ya es todo el ASCII imprimible más los espacios, así que
+    # preguntar además por `isalnum()` o `isspace()` no añadía nada salvo la
+    # puerta por la que se colaban las letras no-ASCII (Ω, μ, þ): quien no esté
+    # en ese conjunto se va, y lo que sale es ASCII por construcción.
+    cleaned = "".join(ch for ch in text if ch in _ALLOWED)
     return cleaned
