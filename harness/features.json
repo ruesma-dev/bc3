@@ -52,6 +52,67 @@
       "priority": 2,
       "branch": "feature/F-002-porcentuales-a-ud",
       "spec": "specs/F-002-porcentuales-a-ud/"
+    },
+    {
+      "id": "F-003",
+      "title": "Aplicación web de limpieza de BC3 (backend + front, en local)",
+      "description": "Un adaptador de entrada web para la limpieza que ya hace F-002, junto a la GUI y el CLI que este proyecto ya tiene: FastAPI + Jinja2 + JS vanilla servido por el propio backend, que es el patrón del ecosistema (ver azure-apps/dedicacion.md, el ejemplar más limpio). El usuario sube un .bc3, elige qué limpiar y se descarga el resultado. Las opciones visibles son las banderas que la pasada ya expone: convertir porcentuales a UD, limpiar el texto y número de decimales. NO se guarda nada: el fichero se procesa y se devuelve; ni base de datos, ni blob, ni SharePoint. Esta feature deja la aplicación funcionando EN LOCAL; el despliegue y el alta en el portal son F-004. Los proyectos hermanos se miran como referencia, no se copian: de `comprare_bc3` interesa cómo estructura la comparación y de `postventa-incidencias` (azure-apps/postventa_incidencias.md §8) el circuito de subir y procesar ficheros del usuario, pero el humano ha pedido explícitamente mejorarlo, no replicarlo. ESTILO (pedido explícito del humano): fiel al front de `postventa-incidencias` (services/postventa-front). Es decir Tailwind por CDN y Alpine.js con la versión FIJADA (allí es 3.14.1, con un comentario explicando por qué no se deja en 3.x: un cambio del CDN rompería el front), hoja propia mínima con `--ruesma-burdeos: #ad1833`, fondo `bg-slate-50` y texto `text-slate-800`, cabecera con título, subtítulo y un indicador del estado del backend (punto verde / rojo / gris pulsante) más la versión. Esto matiza el 'Jinja2 + JS vanilla' del patrón general del ecosistema: manda el parecido con postventa.",
+      "acceptance": [
+        "Un endpoint recibe un .bc3 y las opciones de limpieza, y devuelve el fichero procesado como descarga, con nombre derivado del original.",
+        "La página permite subir el fichero, marcar qué limpieza aplicar y descargar el resultado, sin recargar para ver el progreso.",
+        "El front sigue el estilo de `postventa-incidencias`: Tailwind por CDN, Alpine.js con versión fija, paleta slate, `--ruesma-burdeos` y cabecera con indicador de estado del backend y versión.",
+        "Reutiliza `infrastructure/bc3/bc3_porcentajes.py` tal cual: la lógica de limpieza no se duplica ni se reimplementa en la capa web.",
+        "El informe de la pasada (líneas convertidas, conceptos eliminados, casos excepcionales) se muestra al usuario tras procesar.",
+        "Nada persiste: ni el fichero subido ni el resultado quedan en disco al terminar la petición, salvo temporales que se borran.",
+        "Un .bc3 inválido o un fichero que no lo sea devuelve un error legible, no una traza.",
+        "Tests sin red ni servicios externos que cubran el endpoint con un .bc3 de fixture, incluidas las opciones activadas y desactivadas.",
+        "bash harness/init.sh en verde"
+      ],
+      "status": "pending",
+      "sdd": true,
+      "rigor": "estandar",
+      "priority": 3,
+      "branch": "feature/F-003-web-limpieza"
+    },
+    {
+      "id": "F-004",
+      "title": "Despliegue en Azure y activación de la tarjeta del portal",
+      "description": "Llevar la web de F-003 a una Container App y encender la tarjeta 'Gestión BC3' que YA existe en el portal (front-portal/public/assets/js/catalog.js, hoy con url vacía, comingSoon true y el GUID del grupo en placeholder REEMPLAZAR_OBJECT_ID_bc3_usuarios). Patrón del ecosistema: Container App con ingress externo y Easy Auth de Entra, autorización por grupo `bc3-usuarios` con asignación requerida en la Enterprise App; registro `acralbaranesdev` con pull por identidad gestionada; tags de imagen fechados rAAAAMMDD-HHmm que NO se reescriben nunca, imagen base por digest y requirements-lock (azure-apps/mcp_bbdd.md §5 fija estas prácticas). Sin base de datos: esta app no es inquilina del PostgreSQL compartido, así que no toca su contrato de buena vecindad. Ojo al reparto de dueños: el documento del portal lo mantiene front-portal, pero `azure-apps/bc3.md` es de ESTE proyecto y hay que crearlo como copia de docs/INTEGRACION.md con su cabecera de origen y fecha.",
+      "acceptance": [
+        "La app corre en una Container App con ingress externo y Easy Auth de Entra: sin sesión válida devuelve 401 y no llega al código.",
+        "Existe el grupo Entra `bc3-usuarios` y solo sus miembros pueden entrar (asignación requerida en la Enterprise App).",
+        "La imagen se publica en `acralbaranesdev` con tag fechado rAAAAMMDD-HHmm y se despliega por script idempotente versionado en `infra/`.",
+        "El pull de la imagen va por identidad gestionada con rol AcrPull: no se reactiva el usuario admin del registro.",
+        "La tarjeta del portal queda con la URL real, el Object ID del grupo y comingSoon a false; se prueba con un usuario del grupo y con otro que no lo esté.",
+        "`docs/INTEGRACION.md` en este repositorio y su copia en `azure-apps/bc3.md`, con cabecera de origen y fecha, sin secretos ni GUIDs, más la fila en el README de azure-apps.",
+        "Ningún secreto en el repositorio: los que haga falta, por referencia a Key Vault.",
+        "bash harness/init.sh en verde"
+      ],
+      "status": "pending",
+      "sdd": true,
+      "rigor": "critico",
+      "priority": 4,
+      "branch": "feature/F-004-despliegue-portal"
+    },
+    {
+      "id": "F-005",
+      "title": "Comparación de dos BC3 en la web",
+      "description": "Segunda función de la tarjeta: subir dos .bc3 y obtener un informe de diferencias. La lógica de referencia está en el proyecto `comprare_bc3` (application/services/diff_service.py, 332 líneas: precios, cantidades, importes, altas y bajas, y descripciones largas con tolerancias configurables; e infrastructure/exporters/excel_workbook_combined_min.py, que genera un Excel de seis hojas con los cambios de texto resaltados). El humano ha pedido traer lo que interese PERO mejorándolo, no copiarlo tal cual: hay que revisar las tolerancias, el trato de los conceptos que no existen en uno de los dos ficheros y la legibilidad del informe. Ambos proyectos ya leen BC3 con la misma librería (`bc3-lib`, del repositorio bc3_reader), así que hablan el mismo formato.",
+      "acceptance": [
+        "La página permite subir dos .bc3 y devuelve el informe de diferencias como descarga.",
+        "La pantalla de comparación mantiene el mismo estilo que la de limpieza (el de `postventa-incidencias`): se percibe como la misma aplicación, no como dos.",
+        "El informe distingue, como mínimo: cambios de precio, de cantidad, de importe, altas y bajas de conceptos, y cambios de descripción.",
+        "Las tolerancias de comparación son explícitas y configurables, y están documentadas: qué diferencia se considera cambio y cuál es ruido de redondeo.",
+        "Un concepto presente en un fichero y ausente en el otro se reporta como alta o baja, nunca como un cambio de precio contra cero.",
+        "Tests sin red con dos .bc3 de fixture que cubran cada tipo de diferencia, incluido el caso de fichero idéntico (informe vacío).",
+        "Verificación del humano sobre dos revisiones reales de un mismo presupuesto, comparando el resultado con lo que ve en Presto.",
+        "bash harness/init.sh en verde"
+      ],
+      "status": "pending",
+      "sdd": true,
+      "rigor": "estandar",
+      "priority": 5,
+      "branch": "feature/F-005-web-comparar"
     }
   ]
 }
