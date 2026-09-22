@@ -46,7 +46,7 @@
         "El BC3 resultante se importa sin errores en Presto (comprobación manual del humano sobre un presupuesto real, anotada en progress/).",
         "bash harness/init.sh en verde"
       ],
-      "status": "in_progress",
+      "status": "done",
       "sdd": true,
       "rigor": "critico",
       "priority": 2,

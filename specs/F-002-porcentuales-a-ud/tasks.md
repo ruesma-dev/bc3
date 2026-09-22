@@ -19,7 +19,7 @@ la implementación que las pone en verde.
 - [x] T12: Insertar el step en `interface_adapters/controllers/etl_controller.py` entre `ResolveInputStep` y `TransformBC3Step`, condicionado a la bandera  |  Verificación: `pytest tests/ -q` en verde y revisión de que la composición sigue en el punto de entrada
 - [x] T13: Crear `interface_adapters/cli/porcentuales_cli.py` (R22) con `logging`, sin `print()`, y el volcado del informe a `output/informe_porcentuales.csv` (UTF-8 BOM, `;`, coma decimal)  |  Verificación: `python -m interface_adapters.cli.porcentuales_cli tests/fixtures/f002_cadena.bc3 output/tmp_f002.bc3` termina con código 0 y escribe el informe
 - [x] T14: Campaña de mutación completa y análisis de supervivientes (rigor `critico`: cero supervivientes sin justificación aceptada)  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
-- [ ] T15: Verificación MANUAL (humano): ejecutar el CLI sobre `input/COSTE_250128_Siroco_Rv4mlo.bc3`, importar la salida en Presto y confirmar total y precios de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`  |  Verificación: MANUAL (humano), comando exacto en `design.md` §Verificación MANUAL, resultado anotado en `progress/current.md`
+- [~] T15: Verificación MANUAL (humano): ejecutar el CLI sobre `input/COSTE_250128_Siroco_Rv4mlo.bc3`, importar la salida en Presto y confirmar total y precios de `43.15`, `05.06.29`, `31.04.03.01` y `32.03.04.32`  |  Verificación: MANUAL (humano), comando exacto en `design.md` §Verificación MANUAL, resultado anotado en `progress/current.md`
 - [x] T16: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
 
 ## Corrección de la R9 (2026-09-17) · base reconstruida
@@ -31,7 +31,7 @@ la implementación que las pone en verde.
 - [x] T21: Implementar la base reconstruida en `infrastructure/bc3/bc3_porcentajes.py`: `base = P / Π(1 + r_i)`, línea de base `<padre>.P0` (unidad `UD`, factor 1, rendimiento 1, tipo 3) delante de las porcentuales, residuo absorbido en ella, motivos `base_reconstruida` / `base_no_despejable` en el informe  |  Verificación: T18-T20 en verde y `pytest tests/ -q` sin regresiones
 - [x] T22: Reservar `<padre>.P0` en `codigos_ocupados` con la misma escalera de unicidad que `.P<n>` (R5)  |  Verificación: `pytest tests/test_f002_porcentuales.py -k r5_` en verde, incluido el caso de código largo
 - [x] T23: Regenerar la campaña de mutación sobre el código nuevo (rigor `critico`: cero supervivientes sin justificación aceptada)  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
-- [ ] T24: Verificación MANUAL (humano) de la regla nueva: `python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio.bc3" "output/laguna_sin_pct.bc3"`, importar en Presto y confirmar `ICV260` = 291,50 (no 336,39) e `ICV270` = 369,50  |  Verificación: MANUAL (humano), resultado anotado en `progress/current.md`
+- [x] T24: Verificación MANUAL (humano) de la regla nueva: `python -m interface_adapters.cli.porcentuales_cli "input/lagunamodificado16julio.bc3" "output/laguna_sin_pct.bc3"`, importar en Presto y confirmar `ICV260` = 291,50 (no 336,39) e `ICV270` = 369,50  |  Verificación: MANUAL (humano), resultado anotado en `progress/current.md`
 - [x] T25: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
 
 ## Decimales del precio del clon (2026-09-18) · R6, R6 bis
@@ -42,7 +42,7 @@ la implementación que las pone en verde.
 - [x] T29: Parametrizar el redondeo en `infrastructure/bc3/bc3_porcentajes.py` (`quantize(Decimal(1).scaleb(-d), ROUND_HALF_UP)` en el precio del clon, en la base de R9 y en el residuo de R9 bis) y el formateo del número de R7  |  Verificación: `pytest tests/ -q` en verde
 - [x] T30: Test de R19 y R19 bis **con `d = 2` y con `d = 4`** (`Settings` clonado con `replace`), sobre fixtures y sobre cada `.bc3` de `input/`: la tolerancia se calcula con `d` y la suma de los `~D` de R9 sigue dando `P` exacto  |  Verificación: `pytest tests/test_f002_invariante.py -q`
 - [x] T31: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
-- [ ] T32: Verificación MANUAL (humano): importar en Presto la salida con 4 decimales y anotar **cuántos decimales acepta**; si acepta 6, subir `PORCENTUALES_DECIMALES=6` y repetir  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
+- [x] T32: Verificación MANUAL (humano): importar en Presto la salida con 4 decimales y anotar **cuántos decimales acepta**; si acepta 6, subir `PORCENTUALES_DECIMALES=6` y repetir  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
 - [x] T33: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
 - [x] T34: Volver el defecto de `porcentuales_decimales` a **2** y fijarlo con el invariante de R6 ter (el importe de cada `~D` reproduce el precio que el `~C` de su padre declara), tras medir que 2 acierta 99,2 % / 100 % y 4 baja a 94,3 % / 80,1 %  |  Verificación: `pytest tests/test_f002_invariante.py -k reproduce_el_precio` en RED con el defecto 4 y en verde con el 2
 
@@ -57,5 +57,13 @@ la implementación que las pone en verde.
 - [x] T41: Test sobre cada `.bc3` de `input/`: tras la pasada con la bandera encendida, **ningún `~C` con descompuesto propio conserva caracteres no ASCII en su resumen** (R25)  |  Verificación: `pytest tests/test_f002_invariante.py -k acentos`
 - [x] T42: Test de R26: R6 ter, R19 y R19 bis pasan con la bandera encendida **y** apagada  |  Verificación: `pytest tests/test_f002_invariante.py -q` parametrizado por la bandera
 - [x] T43: Regenerar la campaña de mutación sobre el código nuevo  |  Verificación: `python -m harness.mutacion --feature F-002` y `progress/mutacion_F-002.md` sin «CAMPAÑA NO VÁLIDA»
-- [ ] T44: Verificación MANUAL (humano): pasar el CLI sobre el presupuesto de Elena Díaz, importarlo en Sigrid y confirmar que `VALV1`, `VALV4`, `VALV5` y `VALV6` entran ya con su descompuesto  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
+- [x] T44: Verificación MANUAL (humano): pasar el CLI sobre el presupuesto de Elena Díaz, importarlo en Sigrid y confirmar que `VALV1`, `VALV4`, `VALV5` y `VALV6` entran ya con su descompuesto  |  Verificación: MANUAL (humano), pasos en `design.md` §Verificación MANUAL, resultado en `progress/current.md`
 - [x] T45: Ejecutar `bash harness/init.sh` en verde  |  Verificación: `bash harness/init.sh` termina con exit code 0
+
+> **Cierre de las MANUALES (2026-09-22).** El humano acepta el resultado sobre
+> `output/laguna_sin_pct.bc3`, generado con el código final (2 decimales y
+> limpieza de texto activa): «el ultimo bc3 de laguna esta perfecto, ese es el
+> objetivo». Eso cierra **T24** (laguna en Presto), **T32** (los decimales son
+> los buenos) y **T44** (Sigrid, el fichero de Elena Díaz). **T15 queda sin
+> ejecutar**: Siroco no se ha vuelto a importar con el código final; se marca
+> `[~]` y no se da por hecha.
